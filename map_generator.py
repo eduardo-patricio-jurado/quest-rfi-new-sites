@@ -99,7 +99,7 @@ def download_site_data():
 
     df.columns = df.columns.str.strip().str.lower()
 
-    required_cols = ['latitude', 'longitude', 'radius']
+    required_cols = ['id', 'latitude', 'longitude', 'radius']
     for col in required_cols:
         if col not in df.columns:
             print(f"Missing required column: {col}")
@@ -114,7 +114,7 @@ def download_site_data():
     print("Generating Master Map...")
 
     marker_params = [
-        f"color:red|{row['latitude']},{row['longitude']}"
+        f"color:red|label:{row['id']}|{row['latitude']},{row['longitude']}"
         for _, row in df.iterrows()
         if not pd.isna(row['latitude']) and not pd.isna(row['longitude'])
     ]
@@ -144,6 +144,7 @@ def download_site_data():
 
     for index, row in df.iterrows():
 
+        site_id = safe_filename(row['id'])
         lat = row['latitude']
         lng = row['longitude']
         radius = row['radius']
@@ -152,12 +153,16 @@ def download_site_data():
             logging.warning(f"Skipping row {index} due to missing data.")
             continue
 
-        site_name = row['site_name'] if 'site_name' in df.columns else f"{round(lat,5)}_{round(lng,5)}"
-        site_name = safe_filename(site_name)
+        if 'site_name' in df.columns:
+            site_name = safe_filename(row['site_name'])
+        else:
+            site_name = f"{round(lat,5)}_{round(lng,5)}"
+
+        base_filename = f"{site_id}_{site_name}"
 
         circle_path = get_circle_path(lat, lng, radius)
 
-        print(f"Processing: {site_name}")
+        print(f"Processing: {base_filename}")
 
         views = {
             "roadmap": {
@@ -201,12 +206,11 @@ def download_site_data():
         futures = []
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-
             for view_name, data in views.items():
                 url = f"{data['base']}?{urlencode(data['params'])}"
                 filepath = os.path.join(
                     OUTPUT_FOLDER,
-                    f"{site_name}_{view_name}.png"
+                    f"{base_filename}_{view_name}.png"
                 )
                 futures.append(executor.submit(download_image, url, filepath))
 
@@ -224,62 +228,48 @@ def download_site_data():
         html_content = f"""
         <html>
         <head>
-            <title>{site_name}</title>
-            <style>
-                body {{ font-family: sans-serif; margin: 40px; background: #f4f4f4; }}
-                .container {{ background: white; padding: 20px; border-radius: 8px; }}
-                .image-grid {{ display: flex; gap: 15px; flex-wrap: wrap; }}
-                img {{ max-width: 400px; border: 1px solid #ddd; }}
-                a {{ margin-right: 10px; }}
-            </style>
+            <title>{base_filename}</title>
         </head>
         <body>
-            <div class="container">
-                <h1>{site_name}</h1>
-                <p><strong>Coordinates:</strong> {lat}, {lng}</p>
-                <p><strong>Radius:</strong> {radius} meters</p>
+            <h1>{base_filename}</h1>
+            <p><strong>ID:</strong> {site_id}</p>
+            <p><strong>Coordinates:</strong> {lat}, {lng}</p>
+            <p><strong>Radius:</strong> {radius} meters</p>
 
-                <p>
-                    <a href="{maps_link}" target="_blank">Google Maps</a>
-                    <a href="{sv_link}" target="_blank">Street View</a>
-                    <a href="{earth_link}" target="_blank">Google Earth</a>
-                </p>
+            <p>
+                <a href="{maps_link}" target="_blank">Google Maps</a> |
+                <a href="{sv_link}" target="_blank">Street View</a> |
+                <a href="{earth_link}" target="_blank">Google Earth</a>
+            </p>
 
-                <div class="image-grid">
-                    <div>
-                        <h3>Satellite</h3>
-                        <img src="{site_name}_satellite.png">
-                    </div>
-                    <div>
-                        <h3>Roadmap</h3>
-                        <img src="{site_name}_roadmap.png">
-                    </div>
-                    <div>
-                        <h3>Street View</h3>
-                        <img src="{site_name}_streetview.png">
-                    </div>
-                </div>
-            </div>
+            <h3>Satellite</h3>
+            <img src="{base_filename}_satellite.png"><br>
+
+            <h3>Roadmap</h3>
+            <img src="{base_filename}_roadmap.png"><br>
+
+            <h3>Street View</h3>
+            <img src="{base_filename}_streetview.png"><br>
         </body>
         </html>
         """
 
-        dashboard_path = os.path.join(OUTPUT_FOLDER, f"{site_name}_dashboard.html")
+        dashboard_path = os.path.join(
+            OUTPUT_FOLDER,
+            f"{base_filename}_dashboard.html"
+        )
 
         with open(dashboard_path, 'w') as f:
             f.write(html_content)
 
         summary_rows.append({
+            "id": site_id,
             "site_name": site_name,
             "latitude": lat,
             "longitude": lng,
             "radius_meters": radius,
-            "dashboard_file": f"{site_name}_dashboard.html"
+            "dashboard_file": f"{base_filename}_dashboard.html"
         })
-
-    # =========================
-    # SUMMARY REPORT
-    # =========================
 
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(os.path.join(OUTPUT_FOLDER, "SUMMARY_REPORT.csv"), index=False)
