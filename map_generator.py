@@ -70,7 +70,7 @@ def download_site_data():
         
         circle_path = get_circle_path(lat, lng, radius)
         
-        # Define API views for images
+        # API views
         views = {
             "roadmap": (f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}"
                         f"&zoom={MAP_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=roadmap"
@@ -94,17 +94,66 @@ def download_site_data():
                 with open(os.path.join(OUTPUT_FOLDER, filename), 'wb') as f:
                     f.write(res.content)
 
-        # Create Text File with Browser Links
-        # Google Earth Web uses a slightly different URL format for direct navigation
-        links_filename = f"{c_lat}_{c_lng}_links.txt"
-        with open(os.path.join(OUTPUT_FOLDER, links_filename), 'w') as f:
-            f.write(f"Location Links for {c_lat}, {c_lng}\n")
-            f.write("-" * 40 + "\n\n")
-            f.write(f"Google Maps (Standard):\nhttps://www.google.com/maps/search/?api=1&query={lat},{lng}\n\n")
-            f.write(f"Google Maps (Street View):\nhttps://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}\n\n")
-            f.write(f"Google Earth (Web):\nhttps://earth.google.com/web/@{lat},{lng},0a,500d,35y,0h,0t,0r\n")
+        # 3. Create HTML Dashboard
+        # Generating direct browser links
+        maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+        sv_link = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
+        earth_link = f"https://earth.google.com/web/@{lat},{lng},500d,35y,0h,0t,0r"
 
-    print(f"\nCompleted. All files and links saved in '{OUTPUT_FOLDER}'.")
+        html_content = f"""
+        <html>
+        <head>
+            <title>Site Data: {c_lat}, {c_lng}</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 40px; background: #f4f4f4; }}
+                .container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                .links {{ margin: 20px 0; }}
+                .links a {{ 
+                    display: inline-block; padding: 10px 20px; margin-right: 10px; 
+                    background: #4285F4; color: white; text-decoration: none; border-radius: 4px; 
+                }}
+                .links a:hover {{ background: #357ae8; }}
+                .image-grid {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }}
+                .image-box {{ text-align: center; }}
+                img {{ border: 1px solid #ddd; border-radius: 4px; max-width: 400px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Site Coordinate: {c_lat}, {c_lng}</h1>
+                <p>Radius: {radius} meters</p>
+                
+                <div class="links">
+                    <a href="{maps_link}" target="_blank">Open in Google Maps</a>
+                    <a href="{sv_link}" target="_blank">Open Street View</a>
+                    <a href="{earth_link}" target="_blank">Open in Google Earth</a>
+                </div>
+
+                <div class="image-grid">
+                    <div class="image-box">
+                        <p><strong>Satellite (Earth View)</strong></p>
+                        <img src="{c_lat}_{c_lng}_satellite.png">
+                    </div>
+                    <div class="image-box">
+                        <p><strong>Roadmap</strong></p>
+                        <img src="{c_lat}_{c_lng}_roadmap.png">
+                    </div>
+                    <div class="image-box">
+                        <p><strong>Street View</strong></p>
+                        <img src="{c_lat}_{c_lng}_streetview.png">
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        html_filename = f"{c_lat}_{c_lng}_dashboard.html"
+        with open(os.path.join(OUTPUT_FOLDER, html_filename), 'w') as f:
+            f.write(html_content)
+
+    print(f"\nCompleted. Dashboards saved in '{OUTPUT_FOLDER}'.")
 
 if __name__ == "__main__":
     download_site_data()
