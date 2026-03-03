@@ -65,13 +65,12 @@ def download_site_data():
     print("\nStep 2: Processing individual site details...")
     for index, row in df.iterrows():
         lat, lng, radius = row['latitude'], row['longitude'], row['radius']
-        
-        # Clean coordinates for filename (round to 5 decimals)
         c_lat = round(lat, 5)
         c_lng = round(lng, 5)
         
         circle_path = get_circle_path(lat, lng, radius)
         
+        # Define API views for images
         views = {
             "roadmap": (f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}"
                         f"&zoom={MAP_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=roadmap"
@@ -86,18 +85,26 @@ def download_site_data():
         }
 
         print(f"   - Processing: {c_lat}, {c_lng}")
+        
+        # Download Images
         for view_name, url in views.items():
             res = requests.get(url)
             if res.status_code == 200:
-                # NEW NAMING CONVENTION: LAT_LNG_TYPE.png
                 filename = f"{c_lat}_{c_lng}_{view_name}.png"
-                filepath = os.path.join(OUTPUT_FOLDER, filename)
-                with open(filepath, 'wb') as f:
+                with open(os.path.join(OUTPUT_FOLDER, filename), 'wb') as f:
                     f.write(res.content)
-            else:
-                print(f"     ! Error fetching {view_name}")
 
-    print(f"\nCompleted. All files saved in '{OUTPUT_FOLDER}'.")
+        # Create Text File with Browser Links
+        # Google Earth Web uses a slightly different URL format for direct navigation
+        links_filename = f"{c_lat}_{c_lng}_links.txt"
+        with open(os.path.join(OUTPUT_FOLDER, links_filename), 'w') as f:
+            f.write(f"Location Links for {c_lat}, {c_lng}\n")
+            f.write("-" * 40 + "\n\n")
+            f.write(f"Google Maps (Standard):\nhttps://www.google.com/maps/search/?api=1&query={lat},{lng}\n\n")
+            f.write(f"Google Maps (Street View):\nhttps://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}\n\n")
+            f.write(f"Google Earth (Web):\nhttps://earth.google.com/web/@{lat},{lng},0a,500d,35y,0h,0t,0r\n")
+
+    print(f"\nCompleted. All files and links saved in '{OUTPUT_FOLDER}'.")
 
 if __name__ == "__main__":
     download_site_data()
