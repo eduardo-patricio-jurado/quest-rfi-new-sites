@@ -65,11 +65,10 @@ def download_site_data():
     print("\nStep 2: Processing individual site details...")
     for index, row in df.iterrows():
         lat, lng, radius = row['latitude'], row['longitude'], row['radius']
-        site_id = index + 1
         
         # Clean coordinates for filename (round to 5 decimals)
-        clean_lat = round(lat, 5)
-        clean_lng = round(lng, 5)
+        c_lat = round(lat, 5)
+        c_lng = round(lng, 5)
         
         circle_path = get_circle_path(lat, lng, radius)
         
@@ -86,12 +85,12 @@ def download_site_data():
                            f"&size={IMG_SIZE}&fov=90&pitch=15&key={API_KEY}")
         }
 
-        print(f"   - Processing Site {site_id}: {clean_lat}, {clean_lng}")
+        print(f"   - Processing: {c_lat}, {c_lng}")
         for view_name, url in views.items():
             res = requests.get(url)
             if res.status_code == 200:
-                # NEW NAMING CONVENTION: site_ID_LAT_LNG_TYPE.png
-                filename = f"site_{site_id}_{clean_lat}_{clean_lng}_{view_name}.png"
+                # NEW NAMING CONVENTION: LAT_LNG_TYPE.png
+                filename = f"{c_lat}_{c_lng}_{view_name}.png"
                 filepath = os.path.join(OUTPUT_FOLDER, filename)
                 with open(filepath, 'wb') as f:
                     f.write(res.content)
