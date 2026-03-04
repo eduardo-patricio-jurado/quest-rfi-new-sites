@@ -7,6 +7,7 @@ import json
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
+from tqdm import tqdm
 
 # =========================
 # CONFIGURATION
@@ -213,7 +214,6 @@ def download_site_data():
     coords = []
 
     for _, row in df.iterrows():
-
         lat = row["latitude"]
         lng = row["longitude"]
 
@@ -229,7 +229,7 @@ def download_site_data():
 
     print("Processing sites...")
 
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing Sites"):
 
         site_id = safe_filename(str(row["id"]).strip())
         lat = row["latitude"]
@@ -323,73 +323,14 @@ def download_site_data():
         html=f"""
 <html>
 <head>
-
 <title>{base_filename}</title>
-
 <style>
-
-body {{
-font-family: "Segoe UI", Arial;
-background-color: #f4f6f8;
-margin: 0;
-padding: 40px;
-}}
-
-.container {{
-max-width: 1200px;
-margin: auto;
-background: white;
-padding: 30px;
-border-radius: 10px;
-box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-}}
-
-h1 {{
-margin-top: 0;
-}}
-
-.info-grid {{
-display:grid;
-grid-template-columns:200px auto;
-gap:10px 20px;
-margin-top:20px;
-}}
-
-.info-label {{
-font-weight:bold;
-color:#555;
-}}
-
-.buttons a {{
-display:inline-block;
-padding:10px 18px;
-margin-right:10px;
-background:#1a73e8;
-color:white;
-text-decoration:none;
-border-radius:6px;
-}}
-
-.image-grid {{
-display:grid;
-grid-template-columns:repeat(auto-fit,minmax(350px,1fr));
-gap:25px;
-margin-top:25px;
-}}
-
-.image-card {{
-border:1px solid #e0e0e0;
-border-radius:8px;
-padding:12px;
-background:#fafafa;
-}}
-
-.image-card img {{
-width:100%;
-}}
-
+body {{font-family:Segoe UI,Arial;background:#f4f6f8;padding:40px}}
+.container {{max-width:1200px;margin:auto;background:white;padding:30px;border-radius:10px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}}
+.image-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:25px;margin-top:25px}}
+.image-card {{border:1px solid #e0e0e0;border-radius:8px;padding:12px;background:#fafafa}}
+.image-card img {{width:100%}}
 </style>
-
 </head>
 
 <body>
@@ -398,29 +339,16 @@ width:100%;
 
 <h1>Site Report: {base_filename}</h1>
 
-<div class="info-grid">
+<p><b>Coordinates:</b> {lat}, {lng}</p>
+<p><b>Coverage Radius:</b> {radius} meters</p>
+<p><b>Required Height:</b> {required_height} meters</p>
+<p><b>Ground Elevation:</b> {round(ground_elevation,1)} meters</p>
 
-<div class="info-label">Coordinates</div>
-<div>{lat}, {lng}</div>
-
-<div class="info-label">Coverage Radius</div>
-<div>{radius} meters</div>
-
-<div class="info-label">Required Tower Height</div>
-<div>{required_height} meters</div>
-
-<div class="info-label">Ground Elevation</div>
-<div>{round(ground_elevation,1)} meters</div>
-
-</div>
-
-<div class="buttons">
-
-<a href="{maps_link}" target="_blank">Open Google Maps</a>
-<a href="{sv_link}" target="_blank">Open Street View</a>
+<p>
+<a href="{maps_link}" target="_blank">Open Google Maps</a> |
+<a href="{sv_link}" target="_blank">Open Street View</a> |
 <a href="{earth_link}" target="_blank">Open Google Earth</a>
-
-</div>
+</p>
 
 <div class="image-grid">
 
