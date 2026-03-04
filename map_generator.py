@@ -2,167 +2,72 @@ import pandas as pd
 import requests
 import math
 import os
-import json
-import logging
+import shutil
+import argparse
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlencode
 from tqdm import tqdm
-from ultralytics import YOLO
-import cv2
 
-# =============================
+# =====================================================
 # CONFIG
-# =============================
+# =====================================================
 
 EXCEL_FILE = "locations.xlsx"
 OUTPUT_FOLDER = "maps_output"
-CACHE_FILE = "elevation_cache.json"
 
 IMG_SIZE = "640x640"
-SCALE = 2
 MAP_ZOOM = 15
 EARTH_ZOOM = 20
+SCALE = 2
 
-MAX_WORKERS = 8
-ELEVATION_BATCH_SIZE = 200
+MAX_SITE_WORKERS = 6
 
-# =============================
-# ENV + LOGGING
-# =============================
+STREET_VIEWS = {
+"N":0,
+"E":90,
+"S":180,
+"W":270
+}
+
+# =====================================================
+# ENV
+# =====================================================
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-logging.basicConfig(
-    filename="tower_tool.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+# =====================================================
+# ARGUMENTS
+# =====================================================
 
-# =============================
-# AI MODEL
-# =============================
+parser = argparse.ArgumentParser()
+parser.add_argument("--clear-cache", action="store_true", help="Clear image cache before running")
+args = parser.parse_args()
 
-model = YOLO("yolov8n.pt")
-
-# =============================
+# =====================================================
 # UTILITIES
-# =============================
+# =====================================================
 
-def ensure_output_folder():
+def ensure_folder():
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
 
-def safe_filename(text):
-    return "".join(c for c in str(text) if c.isalnum() or c in ("_","-"))
+def clear_cache():
 
-# =============================
-# ELEVATION CACHE
-# =============================
+    if os.path.exists(OUTPUT_FOLDER):
 
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE,"r") as f:
-            return json.load(f)
-    return {}
+        print("Clearing cache...")
 
-def save_cache(cache):
-    with open(CACHE_FILE,"w") as f:
-        json.dump(cache,f)
+        shutil.rmtree(OUTPUT_FOLDER)
 
-# =============================
-# ELEVATION BATCH
-# =============================
+    os.makedirs(OUTPUT_FOLDER)
 
-def get_elevations(coords, cache):
+def safe(text):
+    return "".join(c for c in str(text) if c.isalnum() or c in("_","-"))
 
-    results = {}
-    uncached = []
-
-    for lat,lng in coords:
-
-        key = f"{lat:.6f},{lng:.6f}"
-
-        if key in cache:
-            results[key] = cache[key]
-        else:
-            uncached.append((lat,lng))
-
-    for i in range(0,len(uncached),ELEVATION_BATCH_SIZE):
-
-        batch = uncached[i:i+ELEVATION_BATCH_SIZE]
-
-        locations = "|".join([f"{lat},{lng}" for lat,lng in batch])
-
-        url = "https://maps.googleapis.com/maps/api/elevation/json"
-
-        params = {
-            "locations": locations,
-            "key": API_KEY
-        }
-
-        r = requests.get(url,params=params)
-        data = r.json()
-
-        if data["status"]!="OK":
-            continue
-
-        for (lat,lng),res in zip(batch,data["results"]):
-
-            elev = res["elevation"]
-
-            key = f"{lat:.6f},{lng:.6f}"
-
-            cache[key] = elev
-            results[key] = elev
-
-    return results
-
-# =============================
-# CIRCLE PATH
-# =============================
-
-def get_circle(lat,lng,radius):
-
-    earth = 6371000
-    dlat = (radius/earth)*(180/math.pi)
-    dlng = dlat/math.cos(math.radians(lat))
-
-    path="color:0xff0000ff|fillcolor:0xff000022|weight:3"
-
-    for i in range(37):
-
-        ang = math.radians(i*10)
-
-        plat = lat + (dlat*math.sin(ang))
-        plng = lng + (dlng*math.cos(ang))
-
-        path += f"|{plat},{plng}"
-
-    return path
-
-# =============================
-# STREET VIEW HELPERS
-# =============================
-
-def get_streetview_pano(lat,lng):
-
-    url="https://maps.googleapis.com/maps/api/streetview/metadata"
-
-    params={
-        "location":f"{lat},{lng}",
-        "key":API_KEY
-    }
-
-    r=requests.get(url,params=params)
-
-    data=r.json()
-
-    if data["status"]=="OK":
-        return data["location"]["lat"],data["location"]["lng"]
-
-    return lat,lng
+# =====================================================
+# HEADING
+# =====================================================
 
 def heading(lat1,lon1,lat2,lon2):
 
@@ -178,92 +83,60 @@ def heading(lat1,lon1,lat2,lon2):
 
     return (math.degrees(b)+360)%360
 
-# =============================
-# OSM TOWER QUERY
-# =============================
+# =====================================================
+# CAMERA OFFSET
+# =====================================================
 
-def query_osm(lat,lng):
+def offset_camera(lat1,lon1,lat2,lon2,distance):
 
-    query=f"""
-    [out:json];
-    node(around:60,{lat},{lng})["man_made"="tower"];
-    out;
-    """
+    R=6378137
 
-    try:
+    brng=math.radians(heading(lat1,lon1,lat2,lon2))
 
-        r=requests.post("https://overpass-api.de/api/interpreter",data=query)
+    lat1=math.radians(lat1)
+    lon1=math.radians(lon1)
 
-        data=r.json()
+    lat2=math.asin(
+        math.sin(lat1)*math.cos(distance/R) +
+        math.cos(lat1)*math.sin(distance/R)*math.cos(brng)
+    )
 
-        if len(data["elements"])>0:
+    lon2=lon1+math.atan2(
+        math.sin(brng)*math.sin(distance/R)*math.cos(lat1),
+        math.cos(distance/R)-math.sin(lat1)*math.sin(lat2)
+    )
 
-            tags=data["elements"][0].get("tags",{})
+    return math.degrees(lat2),math.degrees(lon2)
 
-            height=tags.get("height")
+# =====================================================
+# COVERAGE RADIUS
+# =====================================================
 
-            return True,height
+def circle(lat,lng,radius):
 
-    except:
-        pass
+    earth=6371000
 
-    return False,None
+    dlat=(radius/earth)*(180/math.pi)
+    dlng=dlat/math.cos(math.radians(lat))
 
-# =============================
-# AI TOWER DETECTION
-# =============================
+    path="color:0xff0000ff|fillcolor:0xff000022|weight:3"
 
-def detect_tower(img_path):
+    for i in range(37):
 
-    try:
+        ang=math.radians(i*10)
 
-        results=model(img_path)
+        plat=lat+(dlat*math.sin(ang))
+        plng=lng+(dlng*math.cos(ang))
 
-        if len(results[0].boxes)==0:
-            return False,None
+        path+=f"|{plat},{plng}"
 
-        img=cv2.imread(img_path)
+    return path
 
-        h=img.shape[0]
-
-        tallest=0
-
-        for box in results[0].boxes:
-
-            y1=int(box.xyxy[0][1])
-            y2=int(box.xyxy[0][3])
-
-            ph=y2-y1
-
-            if ph>tallest:
-                tallest=ph
-
-        ratio=tallest/h
-
-        if ratio>0.6:
-            cls="60–90 m"
-        elif ratio>0.4:
-            cls="40–60 m"
-        elif ratio>0.25:
-            cls="30–40 m"
-        elif ratio>0.15:
-            cls="20–30 m"
-        else:
-            cls="10–20 m"
-
-        return True,cls
-
-    except:
-        return False,None
-
-# =============================
-# DOWNLOAD IMAGE
-# =============================
+# =====================================================
+# DOWNLOAD
+# =====================================================
 
 def download(url,file):
-
-    if os.path.exists(file):
-        return
 
     r=requests.get(url)
 
@@ -272,216 +145,148 @@ def download(url,file):
         with open(file,"wb") as f:
             f.write(r.content)
 
-# =============================
-# MAIN
-# =============================
+# =====================================================
+# PROCESS SITE
+# =====================================================
 
-def run():
+def process_site(row):
 
-    ensure_output_folder()
+    sid=safe(row["id"])
+    lat=row["latitude"]
+    lng=row["longitude"]
+    radius=row["radius"]
+    req=row["required_height"]
 
-    df=pd.read_excel(EXCEL_FILE,dtype={"id":str})
-    df.columns=df.columns.str.lower()
+    base=f"{sid}_{round(lat,5)}_{round(lng,5)}"
 
-    cache=load_cache()
+    pano_meta="https://maps.googleapis.com/maps/api/streetview/metadata"
 
-    coords=[(r.latitude,r.longitude) for _,r in df.iterrows()]
+    r=requests.get(pano_meta,params={"location":f"{lat},{lng}","key":API_KEY})
 
-    elevations=get_elevations(coords,cache)
+    data=r.json()
 
-    save_cache(cache)
+    if data["status"]=="OK":
 
-    site_rows=[]
+        pano_lat=data["location"]["lat"]
+        pano_lng=data["location"]["lng"]
 
-    for _,row in tqdm(df.iterrows(),total=len(df),desc="Processing Sites"):
+    else:
 
-        sid=safe_filename(row["id"])
+        pano_lat,pano_lng=lat,lng
 
-        lat=row["latitude"]
-        lng=row["longitude"]
-        radius=row["radius"]
-        req_h=row["required_height"]
+    # =====================================================
+    # TOWER VIEW
+    # =====================================================
 
-        key=f"{lat:.6f},{lng:.6f}"
+    cam_lat,cam_lng=offset_camera(pano_lat,pano_lng,lat,lng,80)
 
-        ground=elevations.get(key,0)
+    hdg=heading(cam_lat,cam_lng,lat,lng)
 
-        pano_lat,pano_lng=get_streetview_pano(lat,lng)
+    tower_img=f"{OUTPUT_FOLDER}/{base}_tower.png"
 
-        hdg=heading(pano_lat,pano_lng,lat,lng)
+    tower_url=f"https://maps.googleapis.com/maps/api/streetview?location={cam_lat},{cam_lng}&heading={hdg}&pitch=12&fov=55&size={IMG_SIZE}&key={API_KEY}"
 
-        circle=get_circle(lat,lng,radius)
+    download(tower_url,tower_img)
 
-        base=f"{sid}_{round(lat,5)}_{round(lng,5)}"
+    # =====================================================
+    # 360 INSPECTION
+    # =====================================================
 
-        street=f"{OUTPUT_FOLDER}/{base}_street.png"
-        sat=f"{OUTPUT_FOLDER}/{base}_sat.png"
-        road=f"{OUTPUT_FOLDER}/{base}_road.png"
+    street_files={}
 
-        street_url=f"https://maps.googleapis.com/maps/api/streetview?location={pano_lat},{pano_lng}&heading={hdg}&size={IMG_SIZE}&key={API_KEY}"
+    for d,a in STREET_VIEWS.items():
 
-        sat_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={EARTH_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=satellite&path={circle}&markers=color:red|{lat},{lng}&key={API_KEY}"
+        file=f"{OUTPUT_FOLDER}/{base}_street_{d}.png"
 
-        road_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={MAP_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=roadmap&path={circle}&markers=color:red|{lat},{lng}&key={API_KEY}"
+        url=f"https://maps.googleapis.com/maps/api/streetview?location={cam_lat},{cam_lng}&heading={a}&pitch=10&fov=80&size={IMG_SIZE}&key={API_KEY}"
 
-        with ThreadPoolExecutor(MAX_WORKERS) as ex:
+        download(url,file)
 
-            ex.submit(download,street_url,street)
-            ex.submit(download,sat_url,sat)
-            ex.submit(download,road_url,road)
+        street_files[d]=file
 
-        osm,osm_h=query_osm(lat,lng)
+    # =====================================================
+    # MAPS
+    # =====================================================
 
-        tower="Not detected"
-        height="N/A"
+    path=circle(lat,lng,radius)
 
-        if osm:
+    sat=f"{OUTPUT_FOLDER}/{base}_sat.png"
+    road=f"{OUTPUT_FOLDER}/{base}_road.png"
 
-            tower="Yes (OpenStreetMap)"
+    sat_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={EARTH_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=satellite&path={path}&markers=color:red|{lat},{lng}&key={API_KEY}"
 
-            if osm_h:
-                height=f"{osm_h} m"
+    road_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={MAP_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=roadmap&path={path}&markers=color:red|{lat},{lng}&key={API_KEY}"
 
-        else:
+    download(sat_url,sat)
+    download(road_url,road)
 
-            det,hcls=detect_tower(street)
+    # =====================================================
+    # DASHBOARD LINKS
+    # =====================================================
 
-            if det:
+    maps_link=f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+    street_link=f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
+    earth_link=f"https://earth.google.com/web/@{lat},{lng},500d,35y,0h,0t,0r"
 
-                tower="Detected (AI Vision)"
-                height=hcls
-
-        maps=f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-
-        html=f"""
+    html=f"""
 <html>
-<head>
+<body style="font-family:Arial;padding:40px">
 
-<style>
+<h2>Site {sid}</h2>
 
-body {{
-    font-family: Segoe UI, Arial;
-    background: #f4f6f8;
-    padding: 40px;
-}}
+<p><b>Coordinates:</b> {lat},{lng}</p>
+<p><b>Required Height:</b> {req} m</p>
 
-.card {{
-    background: white;
-    padding: 25px;
-    border-radius: 10px;
-    max-width: 1100px;
-    margin: auto;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-}}
+<a href="{maps_link}" target="_blank">Google Maps</a> |
+<a href="{street_link}" target="_blank">Street View</a> |
+<a href="{earth_link}" target="_blank">Google Earth</a>
 
-.grid {{
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 20px;
-    margin-top: 25px;
-}}
+<h3>Tower View</h3>
+<img src="{os.path.basename(tower_img)}">
 
-img {{
-    width: 100%;
-    border-radius: 6px;
-}}
+<h3>Street Views</h3>
 
-.buttons a {{
-    display: inline-block;
-    padding: 10px 18px;
-    margin-right: 10px;
-    margin-top: 10px;
-    background: #1a73e8;
-    color: white;
-    text-decoration: none;
-    border-radius: 6px;
-}}
+<img src="{os.path.basename(street_files['N'])}">
+<img src="{os.path.basename(street_files['E'])}">
+<img src="{os.path.basename(street_files['S'])}">
+<img src="{os.path.basename(street_files['W'])}">
 
-.buttons a:hover {{
-    background: #155bc4;
-}}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="card">
-
-<h2>Site Report: {sid}</h2>
-
-<p><b>Coordinates:</b> {lat}, {lng}</p>
-<p><b>Required Height:</b> {req_h} m</p>
-<p><b>Ground Elevation:</b> {round(ground,1)} m</p>
-
-<p><b>Existing Tower:</b> {tower}</p>
-<p><b>Tower Height:</b> {height}</p>
-
-<div class="buttons">
-
-<a href="https://www.google.com/maps/search/?api=1&query={lat},{lng}" target="_blank">
-Open in Google Maps
-</a>
-
-<a href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}" target="_blank">
-Open Street View
-</a>
-
-<a href="https://earth.google.com/web/@{lat},{lng},500d" target="_blank">
-Open in Google Earth
-</a>
-
-</div>
-
-<div class="grid">
-
-<div>
-<h3>Street View</h3>
-<img src="{os.path.basename(street)}">
-</div>
-
-<div>
 <h3>Satellite</h3>
 <img src="{os.path.basename(sat)}">
-</div>
 
-<div>
-<h3>Roadmap</h3>
+<h3>Road Map</h3>
 <img src="{os.path.basename(road)}">
-</div>
-
-</div>
-
-</div>
 
 </body>
 </html>
 """
 
-        dash=f"{OUTPUT_FOLDER}/{base}_dashboard.html"
+    with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w") as f:
+        f.write(html)
 
-        with open(dash,"w") as f:
-            f.write(html)
+# =====================================================
+# MAIN
+# =====================================================
 
-        site_rows.append((sid,lat,lng,req_h,tower,height,dash))
+def run():
 
-    pd.DataFrame(site_rows,columns=[
-        "id","lat","lng","required_height","tower_status","tower_height","dashboard"
-    ]).to_csv(f"{OUTPUT_FOLDER}/summary.csv",index=False)
+    if args.clear_cache:
+        clear_cache()
+    else:
+        ensure_folder()
 
-    index="<html><body><h1>Site Index</h1><table border=1>"
+    df=pd.read_excel(EXCEL_FILE,dtype={"id":str})
 
-    for r in site_rows:
+    rows=df.to_dict("records")
 
-        index+=f"<tr><td>{r[0]}</td><td>{r[3]}</td><td>{r[4]}</td><td><a href='{os.path.basename(r[6])}'>Open</a></td></tr>"
+    with ThreadPoolExecutor(MAX_SITE_WORKERS) as ex:
 
-    index+="</table></body></html>"
+        futures=[ex.submit(process_site,row) for row in rows]
 
-    with open(f"{OUTPUT_FOLDER}/index.html","w") as f:
-        f.write(index)
+        for _ in tqdm(as_completed(futures),total=len(futures),desc="Processing Sites"):
+            pass
 
-    print("\nAll reports generated.")
+    print("Finished")
 
 if __name__=="__main__":
     run()
