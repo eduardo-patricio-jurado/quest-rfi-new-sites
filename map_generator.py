@@ -2,8 +2,8 @@ import pandas as pd
 import requests
 import math
 import os
-import shutil
 import logging
+import json
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
@@ -14,11 +14,15 @@ from urllib.parse import urlencode
 
 EXCEL_FILE = "locations.xlsx"
 OUTPUT_FOLDER = "maps_output"
+CACHE_FILE = "elevation_cache.json"
+
 IMG_SIZE = "640x640"
 SCALE = 2
 MAP_ZOOM = 15
 EARTH_ZOOM = 20
-MAX_WORKERS = 6
+
+MAX_WORKERS = 8
+ELEVATION_BATCH_SIZE = 200
 
 # =========================
 # ENV + LOGGING
@@ -27,10 +31,6 @@ MAX_WORKERS = 6
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-if not API_KEY:
-    print("Error: GOOGLE_MAPS_API_KEY not found in .env file.")
-    exit()
-
 logging.basicConfig(
     filename="map_generator.log",
     level=logging.INFO,
@@ -38,39 +38,55 @@ logging.basicConfig(
 )
 
 # =========================
+# CACHE FUNCTIONS
+# =========================
+
+def load_elevation_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_elevation_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
+
+# =========================
 # UTILITIES
 # =========================
 
-def clean_output_folder():
-    if os.path.exists(OUTPUT_FOLDER):
-        shutil.rmtree(OUTPUT_FOLDER)
-    os.makedirs(OUTPUT_FOLDER)
-
+def ensure_output_folder():
+    if not os.path.exists(OUTPUT_FOLDER):
+        os.makedirs(OUTPUT_FOLDER)
 
 def safe_filename(name):
     return "".join(c for c in str(name) if c.isalnum() or c in ("_", "-"))
 
-
 def get_circle_path(lat, lng, radius_mtr):
-    earth_radius = 6371000
 
+    earth_radius = 6371000
     d_lat = (radius_mtr / earth_radius) * (180 / math.pi)
     d_lng = d_lat / math.cos(math.radians(lat))
 
     path = "color:0xff0000ff|fillcolor:0xff000022|weight:3"
 
-    points = 36
-
-    for i in range(points + 1):
-        angle = math.radians(i * (360 / points))
+    for i in range(37):
+        angle = math.radians(i * 10)
         p_lat = lat + (d_lat * math.sin(angle))
         p_lng = lng + (d_lng * math.cos(angle))
         path += f"|{p_lat},{p_lng}"
 
     return path
 
+# =========================
+# IMAGE DOWNLOAD
+# =========================
 
 def download_image(url, filepath):
+
+    if os.path.exists(filepath):
+        return True
+
     try:
         r = requests.get(url, timeout=20)
 
@@ -86,30 +102,59 @@ def download_image(url, filepath):
         logging.error(f"Download failed: {e}")
         return False
 
+# =========================
+# BATCH ELEVATION REQUEST
+# =========================
 
-def get_ground_elevation(lat, lng):
+def get_elevations_batch(coords, cache):
 
-    url = "https://maps.googleapis.com/maps/api/elevation/json"
+    results = {}
+    uncached = []
 
-    params = {
-        "locations": f"{lat},{lng}",
-        "key": API_KEY
-    }
+    for lat, lng in coords:
 
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
+        key = f"{lat:.6f},{lng:.6f}"
 
-        if data["status"] == "OK":
-            return data["results"][0]["elevation"]
+        if key in cache:
+            results[key] = cache[key]
+        else:
+            uncached.append((lat, lng))
 
-        logging.error(f"Elevation API error: {data}")
-        return None
+    for i in range(0, len(uncached), ELEVATION_BATCH_SIZE):
 
-    except Exception as e:
-        logging.error(f"Elevation request failed: {e}")
-        return None
+        batch = uncached[i:i+ELEVATION_BATCH_SIZE]
 
+        locations = "|".join([f"{lat},{lng}" for lat, lng in batch])
+
+        url = "https://maps.googleapis.com/maps/api/elevation/json"
+
+        params = {
+            "locations": locations,
+            "key": API_KEY
+        }
+
+        try:
+
+            r = requests.get(url, params=params, timeout=20)
+            data = r.json()
+
+            if data["status"] != "OK":
+                logging.error(f"Elevation API error: {data}")
+                continue
+
+            for (lat, lng), res in zip(batch, data["results"]):
+
+                elevation = res["elevation"]
+
+                key = f"{lat:.6f},{lng:.6f}"
+
+                cache[key] = elevation
+                results[key] = elevation
+
+        except Exception as e:
+            logging.error(f"Elevation request failed: {e}")
+
+    return results
 
 # =========================
 # MAIN PROCESS
@@ -117,14 +162,9 @@ def get_ground_elevation(lat, lng):
 
 def download_site_data():
 
-    clean_output_folder()
+    ensure_output_folder()
 
-    try:
-        df = pd.read_excel(EXCEL_FILE, dtype={"id": str})
-    except Exception as e:
-        print(f"Error reading Excel: {e}")
-        return
-
+    df = pd.read_excel(EXCEL_FILE, dtype={"id": str})
     df.columns = df.columns.str.strip().str.lower()
 
     required_cols = ["id", "latitude", "longitude", "radius", "required_height"]
@@ -134,180 +174,156 @@ def download_site_data():
             print(f"Missing required column: {col}")
             return
 
-    summary_rows = []
+    print(f"Total rows in Excel: {len(df)}")
 
-    # =========================
-    # MASTER MAP
-    # =========================
+    elevation_cache = load_elevation_cache()
+
+    coords = []
+
+    for _, row in df.iterrows():
+
+        lat = row["latitude"]
+        lng = row["longitude"]
+
+        if pd.isna(lat) or pd.isna(lng):
+            continue
+
+        coords.append((lat, lng))
+
+    elevation_results = get_elevations_batch(coords, elevation_cache)
+
+    save_elevation_cache(elevation_cache)
+
+    summary_rows = []
 
     print("Generating master map...")
 
-    marker_params = [
-        f"color:red|label:{row['id']}|{row['latitude']},{row['longitude']}"
-        for _, row in df.iterrows()
-        if not pd.isna(row["latitude"]) and not pd.isna(row["longitude"])
-    ]
-
     master_url = f"https://maps.googleapis.com/maps/api/staticmap?size={IMG_SIZE}&scale={SCALE}&maptype=roadmap&key={API_KEY}"
 
-    for marker in marker_params:
-        master_url += f"&markers={marker}"
+    for _, row in df.iterrows():
+
+        lat = row["latitude"]
+        lng = row["longitude"]
+
+        if pd.isna(lat) or pd.isna(lng):
+            continue
+
+        master_url += f"&markers=color:red|label:{row['id']}|{lat},{lng}"
 
     download_image(
         master_url,
         os.path.join(OUTPUT_FOLDER, "00_MASTER_MAP.png")
     )
 
-    # =========================
-    # PROCESS EACH SITE
-    # =========================
-
     print("Processing sites...\n")
 
-    for index, row in df.iterrows():
+    for _, row in df.iterrows():
 
-        site_id = safe_filename(str(row["id"]).strip())
-        lat = row["latitude"]
-        lng = row["longitude"]
-        radius = row["radius"]
-        required_height = row["required_height"]
+        try:
 
-        if pd.isna(lat) or pd.isna(lng) or pd.isna(radius) or pd.isna(required_height):
-            logging.warning(f"Skipping row {index} due to missing data.")
-            continue
+            site_id = safe_filename(str(row["id"]).strip())
+            lat = row["latitude"]
+            lng = row["longitude"]
+            radius = row["radius"]
+            required_height = row["required_height"]
 
-        if "site_name" in df.columns:
-            site_name = safe_filename(row["site_name"])
-        else:
-            site_name = f"{round(lat,5)}_{round(lng,5)}"
+            if pd.isna(lat) or pd.isna(lng) or pd.isna(radius) or pd.isna(required_height):
+                logging.warning(f"Skipping invalid row: {row}")
+                continue
 
-        base_filename = f"{site_id}_{site_name}"
+            if "site_name" in df.columns:
+                site_name = safe_filename(row["site_name"])
+            else:
+                site_name = f"{round(lat,5)}_{round(lng,5)}"
 
-        print(f"Processing: {base_filename}")
+            base_filename = f"{site_id}_{site_name}"
 
-        circle_path = get_circle_path(lat, lng, radius)
+            print(f"Processing site {base_filename}")
 
-        # =========================
-        # ELEVATION
-        # =========================
+            key = f"{lat:.6f},{lng:.6f}"
 
-        ground_elevation = get_ground_elevation(lat, lng)
+            ground_elevation = elevation_results.get(key, 0)
 
-        if ground_elevation is None:
-            ground_elevation = 0
+            tower_top = ground_elevation + required_height
 
-        tower_top_elevation = ground_elevation + required_height
+            circle_path = get_circle_path(lat, lng, radius)
 
-        # =========================
-        # MAP URLs
-        # =========================
+            views = {
 
-        views = {
+                "roadmap": {
+                    "base": "https://maps.googleapis.com/maps/api/staticmap",
+                    "params": {
+                        "center": f"{lat},{lng}",
+                        "zoom": MAP_ZOOM,
+                        "size": IMG_SIZE,
+                        "scale": SCALE,
+                        "maptype": "roadmap",
+                        "path": circle_path,
+                        "markers": f"color:red|{lat},{lng}",
+                        "key": API_KEY
+                    }
+                },
 
-            "roadmap": {
-                "base": "https://maps.googleapis.com/maps/api/staticmap",
-                "params": {
-                    "center": f"{lat},{lng}",
-                    "zoom": MAP_ZOOM,
-                    "size": IMG_SIZE,
-                    "scale": SCALE,
-                    "maptype": "roadmap",
-                    "path": circle_path,
-                    "markers": f"color:red|{lat},{lng}",
-                    "key": API_KEY
-                }
-            },
+                "satellite": {
+                    "base": "https://maps.googleapis.com/maps/api/staticmap",
+                    "params": {
+                        "center": f"{lat},{lng}",
+                        "zoom": EARTH_ZOOM,
+                        "size": IMG_SIZE,
+                        "scale": SCALE,
+                        "maptype": "satellite",
+                        "path": circle_path,
+                        "markers": f"color:red|{lat},{lng}",
+                        "key": API_KEY
+                    }
+                },
 
-            "satellite": {
-                "base": "https://maps.googleapis.com/maps/api/staticmap",
-                "params": {
-                    "center": f"{lat},{lng}",
-                    "zoom": EARTH_ZOOM,
-                    "size": IMG_SIZE,
-                    "scale": SCALE,
-                    "maptype": "satellite",
-                    "path": circle_path,
-                    "markers": f"color:red|{lat},{lng}",
-                    "key": API_KEY
-                }
-            },
-
-            "streetview": {
-                "base": "https://maps.googleapis.com/maps/api/streetview",
-                "params": {
-                    "location": f"{lat},{lng}",
-                    "size": IMG_SIZE,
-                    "fov": 90,
-                    "pitch": 15,
-                    "key": API_KEY
+                "streetview": {
+                    "base": "https://maps.googleapis.com/maps/api/streetview",
+                    "params": {
+                        "location": f"{lat},{lng}",
+                        "size": IMG_SIZE,
+                        "fov": 90,
+                        "pitch": 15,
+                        "key": API_KEY
+                    }
                 }
             }
-        }
 
-        futures = []
+            futures = []
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
 
-            for view_name, data in views.items():
+                for view, data in views.items():
 
-                url = f"{data['base']}?{urlencode(data['params'])}"
+                    url = f"{data['base']}?{urlencode(data['params'])}"
 
-                filepath = os.path.join(
-                    OUTPUT_FOLDER,
-                    f"{base_filename}_{view_name}.png"
-                )
+                    filepath = os.path.join(
+                        OUTPUT_FOLDER,
+                        f"{base_filename}_{view}.png"
+                    )
 
-                futures.append(
-                    executor.submit(download_image, url, filepath)
-                )
+                    futures.append(
+                        executor.submit(download_image, url, filepath)
+                    )
 
-            for future in as_completed(futures):
-                future.result()
+                for f in as_completed(futures):
+                    f.result()
 
-        # =========================
-        # DASHBOARD
-        # =========================
-
-        maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-        sv_link = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
-        earth_link = f"https://earth.google.com/web/@{lat},{lng},500d"
-
-        html = f"""
+            html = f"""
 <html>
-<head>
-<title>{base_filename}</title>
-<style>
-body {{font-family: Arial; margin:40px}}
-.info {{background:#f2f2f2;padding:15px;border-radius:6px;margin-bottom:20px}}
-img {{max-width:500px;margin-bottom:20px}}
-</style>
-</head>
-
 <body>
 
-<h1>Site Report: {base_filename}</h1>
-
-<div class="info">
-
-<p><b>Site ID:</b> {site_id}</p>
+<h2>{base_filename}</h2>
 
 <p><b>Coordinates:</b> {lat}, {lng}</p>
-
-<p><b>Coverage Radius:</b> {radius} meters</p>
-
-<p><b>Required Tower Height:</b> {required_height} meters</p>
-
+<p><b>Coverage Radius:</b> {radius} m</p>
+<p><b>Required Height:</b> {required_height} m</p>
 <p><b>Ground Elevation:</b> {round(ground_elevation,1)} m</p>
+<p><b>Tower Top Elevation:</b> {round(tower_top,1)} m AMSL</p>
 
-<p><b>Tower Top Elevation:</b> {round(tower_top_elevation,1)} m AMSL</p>
-
-</div>
-
-<p>
-<a href="{maps_link}" target="_blank">Google Maps</a> |
-<a href="{sv_link}" target="_blank">Street View</a> |
-<a href="{earth_link}" target="_blank">Google Earth</a>
-</p>
+<h3>Street View</h3>
+<img src="{base_filename}_streetview.png">
 
 <h3>Satellite View</h3>
 <img src="{base_filename}_satellite.png">
@@ -315,43 +331,40 @@ img {{max-width:500px;margin-bottom:20px}}
 <h3>Roadmap</h3>
 <img src="{base_filename}_roadmap.png">
 
-<h3>Street View</h3>
-<img src="{base_filename}_streetview.png">
-
 </body>
 </html>
 """
 
-        dashboard_path = os.path.join(
-            OUTPUT_FOLDER,
-            f"{base_filename}_dashboard.html"
-        )
+            dashboard = os.path.join(
+                OUTPUT_FOLDER,
+                f"{base_filename}_dashboard.html"
+            )
 
-        with open(dashboard_path, "w") as f:
-            f.write(html)
+            with open(dashboard, "w") as f:
+                f.write(html)
 
-        summary_rows.append({
-            "id": site_id,
-            "site_name": site_name,
-            "latitude": lat,
-            "longitude": lng,
-            "radius_meters": radius,
-            "required_height_meters": required_height,
-            "ground_elevation_m": round(ground_elevation,1),
-            "tower_top_elevation_m": round(tower_top_elevation,1),
-            "dashboard_file": f"{base_filename}_dashboard.html"
-        })
+            summary_rows.append({
+                "id": site_id,
+                "latitude": lat,
+                "longitude": lng,
+                "radius": radius,
+                "required_height": required_height,
+                "ground_elevation": ground_elevation,
+                "tower_top_elevation": tower_top
+            })
 
-    summary_df = pd.DataFrame(summary_rows)
+        except Exception as e:
 
-    summary_df.to_csv(
+            logging.error(f"Error processing row {row}: {e}")
+            continue
+
+    pd.DataFrame(summary_rows).to_csv(
         os.path.join(OUTPUT_FOLDER, "SUMMARY_REPORT.csv"),
         index=False
     )
 
-    print("\nCompleted successfully.")
-    print(f"Results saved to '{OUTPUT_FOLDER}'.")
-
+    print("\nCompleted.")
+    print("Results saved to maps_output/")
 
 if __name__ == "__main__":
     download_site_data()
