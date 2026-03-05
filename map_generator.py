@@ -3,290 +3,330 @@ import requests
 import math
 import os
 import shutil
+import logging
 import argparse
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
-# =====================================================
-# CONFIG
-# =====================================================
+# =========================
+# CONFIGURATION
+# =========================
 
 EXCEL_FILE = "locations.xlsx"
 OUTPUT_FOLDER = "maps_output"
 
 IMG_SIZE = "640x640"
+SCALE = 2
 MAP_ZOOM = 15
 EARTH_ZOOM = 20
-SCALE = 2
 
-MAX_SITE_WORKERS = 6
+MAX_WORKERS = 6
 
-STREET_VIEWS = {
-"N":0,
-"E":90,
-"S":180,
-"W":270
-}
-
-# =====================================================
-# ENV
-# =====================================================
+# =========================
+# ENV + LOGGING
+# =========================
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-# =====================================================
-# ARGUMENTS
-# =====================================================
+if not API_KEY:
+    print("Error: GOOGLE_MAPS_API_KEY not found.")
+    exit()
+
+logging.basicConfig(
+    filename="map_generator.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# =========================
+# COMMAND LINE OPTIONS
+# =========================
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--clear-cache", action="store_true", help="Clear image cache before running")
+parser.add_argument("--clear-cache", action="store_true")
 args = parser.parse_args()
 
-# =====================================================
+# =========================
 # UTILITIES
-# =====================================================
+# =========================
 
-def ensure_folder():
+def prepare_output():
+
+    if args.clear_cache and os.path.exists(OUTPUT_FOLDER):
+        shutil.rmtree(OUTPUT_FOLDER)
+
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
 
-def clear_cache():
 
-    if os.path.exists(OUTPUT_FOLDER):
+def safe_filename(name):
+    return "".join(c for c in str(name) if c.isalnum() or c in ("_", "-"))
 
-        print("Clearing cache...")
 
-        shutil.rmtree(OUTPUT_FOLDER)
+def circle(lat, lng, radius):
 
-    os.makedirs(OUTPUT_FOLDER)
+    earth = 6371000
 
-def safe(text):
-    return "".join(c for c in str(text) if c.isalnum() or c in("_","-"))
+    dlat = (radius / earth) * (180 / math.pi)
+    dlng = dlat / math.cos(math.radians(lat))
 
-# =====================================================
-# HEADING
-# =====================================================
-
-def heading(lat1,lon1,lat2,lon2):
-
-    lat1=math.radians(lat1)
-    lat2=math.radians(lat2)
-
-    diff=math.radians(lon2-lon1)
-
-    x=math.sin(diff)*math.cos(lat2)
-    y=math.cos(lat1)*math.sin(lat2)-(math.sin(lat1)*math.cos(lat2)*math.cos(diff))
-
-    b=math.atan2(x,y)
-
-    return (math.degrees(b)+360)%360
-
-# =====================================================
-# CAMERA OFFSET
-# =====================================================
-
-def offset_camera(lat1,lon1,lat2,lon2,distance):
-
-    R=6378137
-
-    brng=math.radians(heading(lat1,lon1,lat2,lon2))
-
-    lat1=math.radians(lat1)
-    lon1=math.radians(lon1)
-
-    lat2=math.asin(
-        math.sin(lat1)*math.cos(distance/R) +
-        math.cos(lat1)*math.sin(distance/R)*math.cos(brng)
-    )
-
-    lon2=lon1+math.atan2(
-        math.sin(brng)*math.sin(distance/R)*math.cos(lat1),
-        math.cos(distance/R)-math.sin(lat1)*math.sin(lat2)
-    )
-
-    return math.degrees(lat2),math.degrees(lon2)
-
-# =====================================================
-# COVERAGE RADIUS
-# =====================================================
-
-def circle(lat,lng,radius):
-
-    earth=6371000
-
-    dlat=(radius/earth)*(180/math.pi)
-    dlng=dlat/math.cos(math.radians(lat))
-
-    path="color:0xff0000ff|fillcolor:0xff000022|weight:3"
+    path = "color:0xff0000ff|fillcolor:0xff000022|weight:3"
 
     for i in range(37):
 
-        ang=math.radians(i*10)
+        ang = math.radians(i * 10)
 
-        plat=lat+(dlat*math.sin(ang))
-        plng=lng+(dlng*math.cos(ang))
+        plat = lat + (dlat * math.sin(ang))
+        plng = lng + (dlng * math.cos(ang))
 
-        path+=f"|{plat},{plng}"
+        path += f"|{plat},{plng}"
 
     return path
 
-# =====================================================
-# DOWNLOAD
-# =====================================================
 
-def download(url,file):
+def download(url, path):
 
-    r=requests.get(url)
+    try:
 
-    if r.status_code==200:
+        r = requests.get(url, timeout=20)
 
-        with open(file,"wb") as f:
-            f.write(r.content)
+        if r.status_code == 200:
 
-# =====================================================
-# PROCESS SITE
-# =====================================================
+            with open(path, "wb") as f:
+                f.write(r.content)
 
-def process_site(row):
+    except Exception as e:
+        logging.error(e)
 
-    sid=safe(row["id"])
-    lat=row["latitude"]
-    lng=row["longitude"]
-    radius=row["radius"]
-    req=row["required_height"]
 
-    base=f"{sid}_{round(lat,5)}_{round(lng,5)}"
+# =========================
+# MAIN
+# =========================
 
-    pano_meta="https://maps.googleapis.com/maps/api/streetview/metadata"
+def run():
 
-    r=requests.get(pano_meta,params={"location":f"{lat},{lng}","key":API_KEY})
+    prepare_output()
 
-    data=r.json()
+    df = pd.read_excel(EXCEL_FILE, dtype={"id": str})
+    df.columns = df.columns.str.strip().str.lower()
 
-    if data["status"]=="OK":
+    summary = []
 
-        pano_lat=data["location"]["lat"]
-        pano_lng=data["location"]["lng"]
+    print("Processing sites...\n")
 
-    else:
+    for _, row in df.iterrows():
 
-        pano_lat,pano_lng=lat,lng
+        site_id = safe_filename(row["id"])
+        lat = row["latitude"]
+        lng = row["longitude"]
+        radius = row["radius"]
+        req_height = row["required_height"]
 
-    # =====================================================
-    # TOWER VIEW
-    # =====================================================
+        site_name = f"{round(lat,5)}_{round(lng,5)}"
+        base = f"{site_id}_{site_name}"
 
-    cam_lat,cam_lng=offset_camera(pano_lat,pano_lng,lat,lng,80)
+        print("Processing:", base)
 
-    hdg=heading(cam_lat,cam_lng,lat,lng)
+        circle_path = circle(lat, lng, radius)
 
-    tower_img=f"{OUTPUT_FOLDER}/{base}_tower.png"
+        # =========================
+        # TOWER VIEW
+        # =========================
 
-    tower_url=f"https://maps.googleapis.com/maps/api/streetview?location={cam_lat},{cam_lng}&heading={hdg}&pitch=12&fov=55&size={IMG_SIZE}&key={API_KEY}"
+        tower_url = (
+            "https://maps.googleapis.com/maps/api/streetview?"
+            f"location={lat},{lng}"
+            f"&size={IMG_SIZE}"
+            "&fov=90"
+            "&pitch=15"
+            f"&key={API_KEY}"
+        )
 
-    download(tower_url,tower_img)
+        download(tower_url, f"{OUTPUT_FOLDER}/{base}_streetview.png")
 
-    # =====================================================
-    # 360 INSPECTION
-    # =====================================================
+        # =========================
+        # 360 STREET VIEWS
+        # =========================
 
-    street_files={}
+        headings = {
+            "north":0,
+            "east":90,
+            "south":180,
+            "west":270
+        }
 
-    for d,a in STREET_VIEWS.items():
+        with ThreadPoolExecutor(MAX_WORKERS) as ex:
 
-        file=f"{OUTPUT_FOLDER}/{base}_street_{d}.png"
+            for name, heading in headings.items():
 
-        url=f"https://maps.googleapis.com/maps/api/streetview?location={cam_lat},{cam_lng}&heading={a}&pitch=10&fov=80&size={IMG_SIZE}&key={API_KEY}"
+                url = (
+                    "https://maps.googleapis.com/maps/api/streetview?"
+                    f"location={lat},{lng}"
+                    f"&heading={heading}"
+                    f"&size={IMG_SIZE}"
+                    "&fov=90"
+                    "&pitch=10"
+                    f"&key={API_KEY}"
+                )
 
-        download(url,file)
+                path = f"{OUTPUT_FOLDER}/{base}_street_{name}.png"
 
-        street_files[d]=file
+                ex.submit(download, url, path)
 
-    # =====================================================
-    # MAPS
-    # =====================================================
+        # =========================
+        # MAPS
+        # =========================
 
-    path=circle(lat,lng,radius)
+        sat_url = (
+            "https://maps.googleapis.com/maps/api/staticmap?"
+            f"center={lat},{lng}&zoom={EARTH_ZOOM}"
+            f"&size={IMG_SIZE}&scale={SCALE}"
+            "&maptype=satellite"
+            f"&path={circle_path}"
+            f"&markers=color:red|{lat},{lng}"
+            f"&key={API_KEY}"
+        )
 
-    sat=f"{OUTPUT_FOLDER}/{base}_sat.png"
-    road=f"{OUTPUT_FOLDER}/{base}_road.png"
+        road_url = (
+            "https://maps.googleapis.com/maps/api/staticmap?"
+            f"center={lat},{lng}&zoom={MAP_ZOOM}"
+            f"&size={IMG_SIZE}&scale={SCALE}"
+            "&maptype=roadmap"
+            f"&path={circle_path}"
+            f"&markers=color:red|{lat},{lng}"
+            f"&key={API_KEY}"
+        )
 
-    sat_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={EARTH_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=satellite&path={path}&markers=color:red|{lat},{lng}&key={API_KEY}"
+        download(sat_url, f"{OUTPUT_FOLDER}/{base}_satellite.png")
+        download(road_url, f"{OUTPUT_FOLDER}/{base}_roadmap.png")
 
-    road_url=f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom={MAP_ZOOM}&size={IMG_SIZE}&scale={SCALE}&maptype=roadmap&path={path}&markers=color:red|{lat},{lng}&key={API_KEY}"
+        # =========================
+        # LINKS
+        # =========================
 
-    download(sat_url,sat)
-    download(road_url,road)
+        sv = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
+        maps = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+        earth = f"https://earth.google.com/web/@{lat},{lng},500d"
 
-    # =====================================================
-    # DASHBOARD LINKS
-    # =====================================================
+        # =========================
+        # DASHBOARD
+        # =========================
 
-    maps_link=f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-    street_link=f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
-    earth_link=f"https://earth.google.com/web/@{lat},{lng},500d,35y,0h,0t,0r"
-
-    html=f"""
+        html = f"""
 <html>
-<body style="font-family:Arial;padding:40px">
+<body style="font-family:Arial;margin:40px">
 
-<h2>Site {sid}</h2>
+<h1>Site Report: {base}</h1>
 
+<p><b>Site ID:</b> {site_id}</p>
 <p><b>Coordinates:</b> {lat},{lng}</p>
-<p><b>Required Height:</b> {req} m</p>
+<p><b>Coverage Radius:</b> {radius} meters</p>
+<p><b>Required Tower Height:</b> {req_height} m</p>
 
-<a href="{maps_link}" target="_blank">Google Maps</a> |
-<a href="{street_link}" target="_blank">Street View</a> |
-<a href="{earth_link}" target="_blank">Google Earth</a>
+<p>
+<a href="{sv}" target="_blank">Street View</a> |
+<a href="{maps}" target="_blank">Google Maps</a> |
+<a href="{earth}" target="_blank">Google Earth</a>
+</p>
 
-<h3>Tower View</h3>
-<img src="{os.path.basename(tower_img)}">
+<h3>Tower Facing View</h3>
+<img src="{base}_streetview.png">
 
-<h3>Street Views</h3>
+<h3>360° Inspection</h3>
 
-<img src="{os.path.basename(street_files['N'])}">
-<img src="{os.path.basename(street_files['E'])}">
-<img src="{os.path.basename(street_files['S'])}">
-<img src="{os.path.basename(street_files['W'])}">
+<b>North</b><br>
+<img src="{base}_street_north.png"><br>
+
+<b>East</b><br>
+<img src="{base}_street_east.png"><br>
+
+<b>South</b><br>
+<img src="{base}_street_south.png"><br>
+
+<b>West</b><br>
+<img src="{base}_street_west.png"><br>
 
 <h3>Satellite</h3>
-<img src="{os.path.basename(sat)}">
+<img src="{base}_satellite.png">
 
-<h3>Road Map</h3>
-<img src="{os.path.basename(road)}">
+<h3>Roadmap</h3>
+<img src="{base}_roadmap.png">
 
 </body>
 </html>
 """
 
-    with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w") as f:
-        f.write(html)
+        with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w") as f:
+            f.write(html)
 
-# =====================================================
-# MAIN
-# =====================================================
+        summary.append({
+            "id": site_id,
+            "lat": lat,
+            "lng": lng,
+            "dashboard": f"{base}_dashboard.html"
+        })
 
-def run():
+    pd.DataFrame(summary).to_csv(
+        f"{OUTPUT_FOLDER}/SUMMARY_REPORT.csv",
+        index=False
+    )
 
-    if args.clear_cache:
-        clear_cache()
-    else:
-        ensure_folder()
+    # =========================
+    # INTERACTIVE MASTER MAP
+    # =========================
 
-    df=pd.read_excel(EXCEL_FILE,dtype={"id":str})
+    print("Generating interactive master map...")
 
-    rows=df.to_dict("records")
+    markers_js = ""
 
-    with ThreadPoolExecutor(MAX_SITE_WORKERS) as ex:
+    for s in summary:
 
-        futures=[ex.submit(process_site,row) for row in rows]
+        markers_js += f"""
+var marker = L.marker([{s['lat']},{s['lng']}]).addTo(map);
+marker.bindPopup("<b>Site {s['id']}</b><br><a href='{s['dashboard']}' target='_blank'>Open Dashboard</a>");
+"""
 
-        for _ in tqdm(as_completed(futures),total=len(futures),desc="Processing Sites"):
-            pass
+    map_html = f"""
+<html>
 
-    print("Finished")
+<head>
 
-if __name__=="__main__":
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+</head>
+
+<body>
+
+<h2 style="font-family:Arial">Tower Sites Interactive Map</h2>
+
+<div id="map" style="height:700px;"></div>
+
+<script>
+
+var map = L.map('map').setView([0,0],2);
+
+L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+maxZoom: 19
+}}).addTo(map);
+
+{markers_js}
+
+</script>
+
+</body>
+
+</html>
+"""
+
+    with open(f"{OUTPUT_FOLDER}/MASTER_MAP_INTERACTIVE.html","w") as f:
+        f.write(map_html)
+
+    print("\nCompleted successfully.")
+    print(f"Results saved to '{OUTPUT_FOLDER}'.")
+
+
+if __name__ == "__main__":
     run()
