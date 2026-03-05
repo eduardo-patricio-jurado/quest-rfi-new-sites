@@ -10,9 +10,9 @@ import numpy as np
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
-# =========================
+# ====================================
 # CONFIGURATION
-# =========================
+# ====================================
 
 EXCEL_FILE = "locations.xlsx"
 OUTPUT_FOLDER = "maps_output"
@@ -23,9 +23,9 @@ EARTH_ZOOM = 20
 SCALE = 2
 MAX_WORKERS = 6
 
-# =========================
+# ====================================
 # ENVIRONMENT
-# =========================
+# ====================================
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
@@ -34,9 +34,9 @@ if not API_KEY:
     print("Missing GOOGLE_MAPS_API_KEY")
     exit()
 
-# =========================
+# ====================================
 # CLI OPTIONS
-# =========================
+# ====================================
 
 parser = argparse.ArgumentParser()
 
@@ -50,21 +50,21 @@ parser.add_argument(
     "--limit",
     type=int,
     default=None,
-    help="Limit number of rows processed"
+    help="Process first N locations only"
 )
 
 parser.add_argument(
     "--site-id",
     type=str,
     default=None,
-    help="Process only a specific site id"
+    help="Process only a specific site ID"
 )
 
 args = parser.parse_args()
 
-# =========================
+# ====================================
 # LOGGING
-# =========================
+# ====================================
 
 logging.basicConfig(
     filename="map_generator.log",
@@ -72,9 +72,9 @@ logging.basicConfig(
     format="%(asctime)s %(message)s"
 )
 
-# =========================
+# ====================================
 # UTILITIES
-# =========================
+# ====================================
 
 def prepare_output():
 
@@ -86,7 +86,7 @@ def prepare_output():
 
 
 def safe_filename(name):
-    return "".join(c for c in str(name) if c.isalnum() or c in ("_","-"))
+    return "".join(c for c in str(name) if c.isalnum() or c in ("_", "-"))
 
 
 def circle(lat,lng,radius):
@@ -121,13 +121,12 @@ def download(url,path):
                 f.write(r.content)
 
     except Exception as e:
-
         logging.error(e)
 
 
-# =========================
+# ====================================
 # TOWER DETECTION
-# =========================
+# ====================================
 
 def detect_tower(image_path):
 
@@ -157,9 +156,9 @@ def detect_tower(image_path):
         return "unknown"
 
 
-# =========================
+# ====================================
 # AREA CLASSIFICATION
-# =========================
+# ====================================
 
 def classify_area(lat,lng):
 
@@ -196,9 +195,9 @@ def classify_area(lat,lng):
         return "Unknown"
 
 
-# =========================
-# MAIN PROCESS
-# =========================
+# ====================================
+# MAIN
+# ====================================
 
 def run():
 
@@ -207,24 +206,15 @@ def run():
     df = pd.read_excel(EXCEL_FILE,dtype={"id":str})
     df.columns = df.columns.str.strip().str.lower()
 
-    # =========================
-    # FILTER OPTIONS
-    # =========================
-
     if args.site_id:
-
         df = df[df["id"] == args.site_id]
-
-        print(f"\nProcessing only site {args.site_id}\n")
+        print(f"\nProcessing site {args.site_id}\n")
 
     elif args.limit:
-
         df = df.head(args.limit)
-
         print(f"\nProcessing first {args.limit} locations\n")
 
     else:
-
         print(f"\nProcessing all {len(df)} locations\n")
 
     summary = []
@@ -232,29 +222,20 @@ def run():
     for _,row in df.iterrows():
 
         try:
-
             lat = float(row["latitude"])
             lng = float(row["longitude"])
             radius = float(row["radius"])
             req = float(row["required_height"])
-
         except:
-
-            logging.warning(f"Skipping invalid row {row}")
             continue
 
         site_id = safe_filename(row["id"])
         site_name = f"{round(lat,5)}_{round(lng,5)}"
-
         base = f"{site_id}_{site_name}"
 
         print("Processing:",base)
 
         circle_path = circle(lat,lng,radius)
-
-        # =========================
-        # STREET VIEW
-        # =========================
 
         tower_url = (
         "https://maps.googleapis.com/maps/api/streetview?"
@@ -270,12 +251,7 @@ def run():
         download(tower_url,tower_path)
 
         tower_status = detect_tower(tower_path)
-
         area_type = classify_area(lat,lng)
-
-        # =========================
-        # 360 VIEWS
-        # =========================
 
         headings = {"north":0,"east":90,"south":180,"west":270}
 
@@ -296,10 +272,6 @@ def run():
                 path = f"{OUTPUT_FOLDER}/{base}_street_{name}.png"
 
                 ex.submit(download,url,path)
-
-        # =========================
-        # MAP IMAGES
-        # =========================
 
         sat_url = (
         "https://maps.googleapis.com/maps/api/staticmap?"
@@ -324,10 +296,6 @@ def run():
         download(sat_url,f"{OUTPUT_FOLDER}/{base}_satellite.png")
         download(road_url,f"{OUTPUT_FOLDER}/{base}_roadmap.png")
 
-        # =========================
-        # DASHBOARD
-        # =========================
-
         maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
         street_link = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
         earth_link = f"https://earth.google.com/web/@{lat},{lng},500d"
@@ -340,11 +308,8 @@ def run():
 
 body {{font-family:Arial;margin:40px;background:#f5f5f5}}
 
-.container {{
-background:white;
-padding:30px;
-border-radius:8px;
-box-shadow:0 2px 10px rgba(0,0,0,0.15);
+.navbar {{
+margin-bottom:25px;
 }}
 
 .button {{
@@ -360,6 +325,13 @@ font-weight:bold;
 
 .button:hover {{background:#2f6ad9}}
 
+.container {{
+background:white;
+padding:30px;
+border-radius:8px;
+box-shadow:0 2px 10px rgba(0,0,0,0.15);
+}}
+
 img {{
 max-width:650px;
 border:1px solid #ddd;
@@ -372,6 +344,16 @@ margin-top:10px;
 
 <body>
 
+<div class="navbar">
+
+<a class="button" href="SUMMARY_REPORT.html">Summary Report</a>
+<a class="button" href="MASTER_MAP_INTERACTIVE.html">Interactive Map</a>
+<a class="button" href="{maps_link}" target="_blank">Google Maps</a>
+<a class="button" href="{street_link}" target="_blank">Street View</a>
+<a class="button" href="{earth_link}" target="_blank">Google Earth</a>
+
+</div>
+
 <div class="container">
 
 <h1>Site {site_id}</h1>
@@ -380,12 +362,6 @@ margin-top:10px;
 <p><b>Area Type:</b> {area_type}</p>
 <p><b>Required Tower Height:</b> {req} m</p>
 <p><b>Tower Detection:</b> {tower_status}</p>
-
-<p>
-<a class="button" href="{maps_link}" target="_blank">Google Maps</a>
-<a class="button" href="{street_link}" target="_blank">Street View</a>
-<a class="button" href="{earth_link}" target="_blank">Google Earth</a>
-</p>
 
 <h3>Tower Facing View</h3>
 <img src="{base}_streetview.png">
@@ -416,7 +392,9 @@ margin-top:10px;
 </html>
 """
 
-        with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w",encoding="utf-8") as f:
+        dashboard_file = f"{base}_dashboard.html"
+
+        with open(f"{OUTPUT_FOLDER}/{dashboard_file}","w",encoding="utf-8") as f:
             f.write(html)
 
         summary.append({
@@ -425,32 +403,30 @@ margin-top:10px;
             "lng":lng,
             "area":area_type,
             "tower":tower_status,
-            "dashboard":f"{base}_dashboard.html"
+            "dashboard":dashboard_file
         })
 
-    # =========================
+    # ====================================
     # SUMMARY REPORT
-    # =========================
+    # ====================================
 
-    rows = ""
+    rows=""
 
     for s in summary:
 
-        rows += f"""
+        rows+=f"""
 <tr>
 <td>{s['id']}</td>
 <td>{s['lat']}</td>
 <td>{s['lng']}</td>
 <td>{s['area']}</td>
 <td>{s['tower']}</td>
-<td><a href="{s['dashboard']}" target="_blank">Open</a></td>
+<td><a href="{s['dashboard']}">Open</a></td>
 </tr>
 """
 
-    summary_html = f"""
+    summary_html=f"""
 <html>
-<head><meta charset="utf-8"></head>
-
 <body style="font-family:Arial;margin:40px">
 
 <h1>Tower Survey Summary</h1>
@@ -461,7 +437,7 @@ margin-top:10px;
 <th>Site ID</th>
 <th>Latitude</th>
 <th>Longitude</th>
-<th>Area Type</th>
+<th>Area</th>
 <th>Tower Detection</th>
 <th>Dashboard</th>
 </tr>
@@ -478,6 +454,7 @@ margin-top:10px;
         f.write(summary_html)
 
     print("\nCompleted successfully.")
+
 
 if __name__ == "__main__":
     run()
