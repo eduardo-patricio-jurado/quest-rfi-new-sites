@@ -31,11 +31,11 @@ load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 if not API_KEY:
-    print("Error: GOOGLE_MAPS_API_KEY not found")
+    print("Missing GOOGLE_MAPS_API_KEY")
     exit()
 
 # =========================
-# CLI OPTIONS
+# CLI
 # =========================
 
 parser = argparse.ArgumentParser()
@@ -66,7 +66,7 @@ def prepare_output():
 
 
 def safe_filename(name):
-    return "".join(c for c in str(name) if c.isalnum() or c in ("_", "-"))
+    return "".join(c for c in str(name) if c.isalnum() or c in ("_","-"))
 
 
 def circle(lat,lng,radius):
@@ -171,7 +171,7 @@ def classify_area(lat,lng):
         return "Unknown"
 
 # =========================
-# MAIN PROCESS
+# MAIN
 # =========================
 
 def run():
@@ -187,16 +187,15 @@ def run():
 
     for _,row in df.iterrows():
 
-        site_id = safe_filename(row["id"])
         try:
             lat = float(row["latitude"])
             lng = float(row["longitude"])
             radius = float(row["radius"])
             req = float(row["required_height"])
-        except Exception as e:
-            logging.error(f"Invalid numeric data for site {row.get('id')}: {e}")
+        except:
             continue
 
+        site_id = safe_filename(row["id"])
         site_name = f"{round(lat,5)}_{round(lng,5)}"
         base = f"{site_id}_{site_name}"
 
@@ -204,7 +203,9 @@ def run():
 
         circle_path = circle(lat,lng,radius)
 
-        # tower street view
+        # =========================
+        # STREET VIEW (TOWER)
+        # =========================
 
         tower_url = (
         "https://maps.googleapis.com/maps/api/streetview?"
@@ -223,7 +224,9 @@ def run():
 
         area_type = classify_area(lat,lng)
 
-        # 360 views
+        # =========================
+        # 360 STREET VIEWS
+        # =========================
 
         headings = {"north":0,"east":90,"south":180,"west":270}
 
@@ -245,7 +248,9 @@ def run():
 
                 ex.submit(download,url,path)
 
-        # satellite map
+        # =========================
+        # SATELLITE MAP
+        # =========================
 
         sat_url = (
         "https://maps.googleapis.com/maps/api/staticmap?"
@@ -256,8 +261,6 @@ def run():
         f"&markers=color:red|{lat},{lng}"
         f"&key={API_KEY}"
         )
-
-        # roadmap
 
         road_url = (
         "https://maps.googleapis.com/maps/api/staticmap?"
@@ -272,39 +275,113 @@ def run():
         download(sat_url,f"{OUTPUT_FOLDER}/{base}_satellite.png")
         download(road_url,f"{OUTPUT_FOLDER}/{base}_roadmap.png")
 
-        # dashboard
+        # =========================
+        # DASHBOARD
+        # =========================
+
+        maps_link = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+        street_link = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
+        earth_link = f"https://earth.google.com/web/@{lat},{lng},500d"
 
         html = f"""
 <html>
-<body style="font-family:Arial;margin:40px">
+
+<head>
+<meta charset="utf-8">
+
+<style>
+
+body {{
+font-family: Arial;
+margin:40px;
+background:#f5f5f5;
+}}
+
+.container {{
+background:white;
+padding:30px;
+border-radius:8px;
+box-shadow:0 2px 10px rgba(0,0,0,0.15);
+}}
+
+.button {{
+display:inline-block;
+padding:10px 18px;
+margin-right:10px;
+background:#4285F4;
+color:white;
+text-decoration:none;
+border-radius:6px;
+font-weight:bold;
+}}
+
+.button:hover {{
+background:#2f6ad9;
+}}
+
+img {{
+max-width:650px;
+border:1px solid #ddd;
+border-radius:6px;
+margin-top:10px;
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
 
 <h1>Site {site_id}</h1>
 
-<p><b>Coordinates:</b> {lat},{lng}</p>
+<p><b>Coordinates:</b> {lat}, {lng}</p>
 <p><b>Area Type:</b> {area_type}</p>
 <p><b>Required Tower Height:</b> {req} m</p>
 <p><b>Tower Detection:</b> {tower_status}</p>
 
-<h3>Tower View</h3>
+<p>
+
+<a class="button" href="{maps_link}" target="_blank">Google Maps</a>
+
+<a class="button" href="{street_link}" target="_blank">Street View</a>
+
+<a class="button" href="{earth_link}" target="_blank">Google Earth</a>
+
+</p>
+
+<h3>Tower Facing View</h3>
 <img src="{base}_streetview.png">
 
-<h3>360 Views</h3>
-<img src="{base}_street_north.png"><br>
-<img src="{base}_street_east.png"><br>
-<img src="{base}_street_south.png"><br>
-<img src="{base}_street_west.png"><br>
+<h3>360 Inspection</h3>
 
-<h3>Satellite</h3>
+<h4>North</h4>
+<img src="{base}_street_north.png">
+
+<h4>East</h4>
+<img src="{base}_street_east.png">
+
+<h4>South</h4>
+<img src="{base}_street_south.png">
+
+<h4>West</h4>
+<img src="{base}_street_west.png">
+
+<h3>Satellite Coverage</h3>
 <img src="{base}_satellite.png">
 
-<h3>Roadmap</h3>
+<h3>Roadmap Coverage</h3>
 <img src="{base}_roadmap.png">
 
+</div>
+
 </body>
+
 </html>
 """
 
-        with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w") as f:
+        with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w",encoding="utf-8") as f:
             f.write(html)
 
         summary.append({
@@ -337,6 +414,8 @@ def run():
 
     summary_html = f"""
 <html>
+<head><meta charset="utf-8"></head>
+
 <body style="font-family:Arial;margin:40px">
 
 <h1>Tower Survey Summary</h1>
@@ -360,107 +439,10 @@ def run():
 </html>
 """
 
-    with open(f"{OUTPUT_FOLDER}/SUMMARY_REPORT.html","w") as f:
+    with open(f"{OUTPUT_FOLDER}/SUMMARY_REPORT.html","w",encoding="utf-8") as f:
         f.write(summary_html)
 
-    # =========================
-    # INTERACTIVE MAP
-    # =========================
-
-    markers_js = ""
-
-    for s in summary:
-
-        color = {
-            "likely":"green",
-            "possible":"orange",
-            "unlikely":"red",
-            "unknown":"gray"
-        }[s["tower"]]
-
-        shape = {
-            "likely":"triangle",
-            "possible":"square",
-            "unlikely":"circle",
-            "unknown":"pentagon"
-        }[s["tower"]]
-
-        if shape == "triangle":
-            svg = f'<svg width="18" height="18"><polygon points="9,1 17,17 1,17" fill="{color}" stroke="black"/></svg>'
-        elif shape == "square":
-            svg = f'<svg width="18" height="18"><rect x="1" y="1" width="16" height="16" fill="{color}" stroke="black"/></svg>'
-        elif shape == "pentagon":
-            svg = f'<svg width="18" height="18"><polygon points="9,1 17,7 14,17 4,17 1,7" fill="{color}" stroke="black"/></svg>'
-        else:
-            svg = f'<svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="{color}" stroke="black"/></svg>'
-
-        markers_js += f"""
-var icon = L.divIcon({{html:`{svg}`,iconSize:[18,18],className:''}});
-var marker = L.marker([{s['lat']},{s['lng']}],{{icon:icon}}).addTo(map);
-marker.bindPopup("<b>Site {s['id']}</b><br>Area: {s['area']}<br>Tower: {s['tower']}<br><a href='{s['dashboard']}' target='_blank'>Open Dashboard</a>");
-"""
-
-    map_html = """
-<html>
-
-<head>
-
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-</head>
-
-<body>
-
-<h2>Tower Sites Interactive Map</h2>
-
-<div id="map" style="height:700px;"></div>
-
-<script>
-
-var map = L.map('map').setView([0,0],2);
-
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-
-""" + markers_js + """
-
-var legend = L.control({position:'bottomright'});
-
-legend.onAdd = function(map){
-
-var div = L.DomUtil.create('div');
-
-div.innerHTML = `
-<div style="background:white;padding:10px;border:1px solid #ccc;border-radius:5px;font-family:Arial;font-size:13px;">
-
-<b>Tower Detection</b><br><br>
-
-<svg width="16" height="16"><polygon points="8,1 15,15 1,15" fill="green"/></svg> Likely<br>
-<svg width="16" height="16"><rect x="1" y="1" width="14" height="14" fill="orange"/></svg> Possible<br>
-<svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="red"/></svg> Unlikely<br>
-<svg width="16" height="16"><polygon points="8,1 15,6 12,15 4,15 1,6" fill="gray"/></svg> Unknown
-
-</div>
-`;
-
-return div;
-
-};
-
-legend.addTo(map);
-
-</script>
-
-</body>
-
-</html>
-"""
-
-    with open(f"{OUTPUT_FOLDER}/MASTER_MAP_INTERACTIVE.html","w") as f:
-        f.write(map_html)
-
     print("\nCompleted successfully.")
-
 
 if __name__ == "__main__":
     run()
