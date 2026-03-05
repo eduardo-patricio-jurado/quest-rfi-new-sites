@@ -5,11 +5,13 @@ import os
 import shutil
 import logging
 import argparse
+import cv2
+import numpy as np
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
 # =========================
-# CONFIGURATION
+# CONFIG
 # =========================
 
 EXCEL_FILE = "locations.xlsx"
@@ -23,14 +25,14 @@ EARTH_ZOOM = 20
 MAX_WORKERS = 6
 
 # =========================
-# ENV + LOGGING
+# ENV
 # =========================
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 if not API_KEY:
-    print("Error: GOOGLE_MAPS_API_KEY not found.")
+    print("Missing GOOGLE_MAPS_API_KEY")
     exit()
 
 logging.basicConfig(
@@ -40,7 +42,7 @@ logging.basicConfig(
 )
 
 # =========================
-# COMMAND LINE OPTIONS
+# CLI
 # =========================
 
 parser = argparse.ArgumentParser()
@@ -64,41 +66,73 @@ def safe_filename(name):
     return "".join(c for c in str(name) if c.isalnum() or c in ("_", "-"))
 
 
-def circle(lat, lng, radius):
+def circle(lat,lng,radius):
 
-    earth = 6371000
+    earth=6371000
 
-    dlat = (radius / earth) * (180 / math.pi)
-    dlng = dlat / math.cos(math.radians(lat))
+    dlat=(radius/earth)*(180/math.pi)
+    dlng=dlat/math.cos(math.radians(lat))
 
-    path = "color:0xff0000ff|fillcolor:0xff000022|weight:3"
+    path="color:0xff0000ff|fillcolor:0xff000022|weight:3"
 
     for i in range(37):
 
-        ang = math.radians(i * 10)
+        ang=math.radians(i*10)
 
-        plat = lat + (dlat * math.sin(ang))
-        plng = lng + (dlng * math.cos(ang))
+        plat=lat+(dlat*math.sin(ang))
+        plng=lng+(dlng*math.cos(ang))
 
-        path += f"|{plat},{plng}"
+        path+=f"|{plat},{plng}"
 
     return path
 
 
-def download(url, path):
+def download(url,path):
 
     try:
 
-        r = requests.get(url, timeout=20)
+        r=requests.get(url,timeout=20)
 
-        if r.status_code == 200:
+        if r.status_code==200:
 
-            with open(path, "wb") as f:
+            with open(path,"wb") as f:
                 f.write(r.content)
 
     except Exception as e:
         logging.error(e)
 
+# =========================
+# TOWER DETECTION
+# =========================
+
+def detect_tower(image_path):
+
+    try:
+
+        img=cv2.imread(image_path)
+
+        gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+
+        edges=cv2.Canny(gray,50,150)
+
+        vertical_kernel=np.array([[1],[-1]])
+
+        vertical_edges=cv2.filter2D(edges,-1,vertical_kernel)
+
+        score=np.sum(vertical_edges>0)/vertical_edges.size
+
+        if score>0.08:
+            return "likely"
+
+        elif score>0.03:
+            return "possible"
+
+        else:
+            return "unlikely"
+
+    except:
+
+        return "unknown"
 
 # =========================
 # MAIN
@@ -108,33 +142,32 @@ def run():
 
     prepare_output()
 
-    df = pd.read_excel(EXCEL_FILE, dtype={"id": str})
-    df.columns = df.columns.str.strip().str.lower()
+    df=pd.read_excel(EXCEL_FILE,dtype={"id":str})
+    df.columns=df.columns.str.strip().str.lower()
 
-    summary = []
+    summary=[]
 
     print("Processing sites...\n")
 
-    for _, row in df.iterrows():
+    for _,row in df.iterrows():
 
-        site_id = safe_filename(row["id"])
-        lat = row["latitude"]
-        lng = row["longitude"]
-        radius = row["radius"]
-        req_height = row["required_height"]
+        site_id=safe_filename(row["id"])
+        lat=row["latitude"]
+        lng=row["longitude"]
+        radius=row["radius"]
+        req_height=row["required_height"]
 
-        site_name = f"{round(lat,5)}_{round(lng,5)}"
-        base = f"{site_id}_{site_name}"
+        site_name=f"{round(lat,5)}_{round(lng,5)}"
 
-        print("Processing:", base)
+        base=f"{site_id}_{site_name}"
 
-        circle_path = circle(lat, lng, radius)
+        print("Processing:",base)
 
-        # =========================
-        # TOWER VIEW
-        # =========================
+        circle_path=circle(lat,lng,radius)
 
-        tower_url = (
+        # tower image
+
+        tower_url=(
             "https://maps.googleapis.com/maps/api/streetview?"
             f"location={lat},{lng}"
             f"&size={IMG_SIZE}"
@@ -143,24 +176,21 @@ def run():
             f"&key={API_KEY}"
         )
 
-        download(tower_url, f"{OUTPUT_FOLDER}/{base}_streetview.png")
+        tower_path=f"{OUTPUT_FOLDER}/{base}_streetview.png"
 
-        # =========================
-        # 360 STREET VIEWS
-        # =========================
+        download(tower_url,tower_path)
 
-        headings = {
-            "north":0,
-            "east":90,
-            "south":180,
-            "west":270
-        }
+        tower_status=detect_tower(tower_path)
+
+        # 360 views
+
+        headings={"north":0,"east":90,"south":180,"west":270}
 
         with ThreadPoolExecutor(MAX_WORKERS) as ex:
 
-            for name, heading in headings.items():
+            for name,heading in headings.items():
 
-                url = (
+                url=(
                     "https://maps.googleapis.com/maps/api/streetview?"
                     f"location={lat},{lng}"
                     f"&heading={heading}"
@@ -170,15 +200,13 @@ def run():
                     f"&key={API_KEY}"
                 )
 
-                path = f"{OUTPUT_FOLDER}/{base}_street_{name}.png"
+                path=f"{OUTPUT_FOLDER}/{base}_street_{name}.png"
 
-                ex.submit(download, url, path)
+                ex.submit(download,url,path)
 
-        # =========================
-        # MAPS
-        # =========================
+        # maps
 
-        sat_url = (
+        sat_url=(
             "https://maps.googleapis.com/maps/api/staticmap?"
             f"center={lat},{lng}&zoom={EARTH_ZOOM}"
             f"&size={IMG_SIZE}&scale={SCALE}"
@@ -188,7 +216,7 @@ def run():
             f"&key={API_KEY}"
         )
 
-        road_url = (
+        road_url=(
             "https://maps.googleapis.com/maps/api/staticmap?"
             f"center={lat},{lng}&zoom={MAP_ZOOM}"
             f"&size={IMG_SIZE}&scale={SCALE}"
@@ -198,135 +226,117 @@ def run():
             f"&key={API_KEY}"
         )
 
-        download(sat_url, f"{OUTPUT_FOLDER}/{base}_satellite.png")
-        download(road_url, f"{OUTPUT_FOLDER}/{base}_roadmap.png")
-
-        # =========================
-        # LINKS
-        # =========================
-
-        sv = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}"
-        maps = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-        earth = f"https://earth.google.com/web/@{lat},{lng},500d"
-
-        # =========================
-        # DASHBOARD
-        # =========================
-
-        html = f"""
-<html>
-<body style="font-family:Arial;margin:40px">
-
-<h1>Site Report: {base}</h1>
-
-<p><b>Site ID:</b> {site_id}</p>
-<p><b>Coordinates:</b> {lat},{lng}</p>
-<p><b>Coverage Radius:</b> {radius} meters</p>
-<p><b>Required Tower Height:</b> {req_height} m</p>
-
-<p>
-<a href="{sv}" target="_blank">Street View</a> |
-<a href="{maps}" target="_blank">Google Maps</a> |
-<a href="{earth}" target="_blank">Google Earth</a>
-</p>
-
-<h3>Tower Facing View</h3>
-<img src="{base}_streetview.png">
-
-<h3>360° Inspection</h3>
-
-<b>North</b><br>
-<img src="{base}_street_north.png"><br>
-
-<b>East</b><br>
-<img src="{base}_street_east.png"><br>
-
-<b>South</b><br>
-<img src="{base}_street_south.png"><br>
-
-<b>West</b><br>
-<img src="{base}_street_west.png"><br>
-
-<h3>Satellite</h3>
-<img src="{base}_satellite.png">
-
-<h3>Roadmap</h3>
-<img src="{base}_roadmap.png">
-
-</body>
-</html>
-"""
-
-        with open(f"{OUTPUT_FOLDER}/{base}_dashboard.html","w") as f:
-            f.write(html)
+        download(sat_url,f"{OUTPUT_FOLDER}/{base}_satellite.png")
+        download(road_url,f"{OUTPUT_FOLDER}/{base}_roadmap.png")
 
         summary.append({
-            "id": site_id,
-            "lat": lat,
-            "lng": lng,
-            "dashboard": f"{base}_dashboard.html"
+            "id":site_id,
+            "lat":lat,
+            "lng":lng,
+            "dashboard":f"{base}_dashboard.html",
+            "tower_status":tower_status
         })
 
-    pd.DataFrame(summary).to_csv(
-        f"{OUTPUT_FOLDER}/SUMMARY_REPORT.csv",
-        index=False
-    )
-
     # =========================
-    # INTERACTIVE MASTER MAP
+    # SUMMARY HTML
     # =========================
 
-    print("Generating interactive master map...")
-
-    markers_js = ""
+    rows=""
 
     for s in summary:
 
-        markers_js += f"""
-var marker = L.marker([{s['lat']},{s['lng']}]).addTo(map);
-marker.bindPopup("<b>Site {s['id']}</b><br><a href='{s['dashboard']}' target='_blank'>Open Dashboard</a>");
+        color={
+            "likely":"#4CAF50",
+            "possible":"#FF9800",
+            "unlikely":"#F44336",
+            "unknown":"gray"
+        }[s["tower_status"]]
+
+        rows+=f"""
+<tr data-status="{s['tower_status']}">
+<td>{s['id']}</td>
+<td>{s['lat']}</td>
+<td>{s['lng']}</td>
+<td style="color:{color}">{s['tower_status']}</td>
+<td><a href="{s['dashboard']}" target="_blank">Open</a></td>
+</tr>
 """
 
-    map_html = f"""
+    html=f"""
 <html>
 
 <head>
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+body{{font-family:Arial;margin:40px}}
+
+table{{border-collapse:collapse;width:100%}}
+
+th,td{{border:1px solid #ddd;padding:10px}}
+
+th{{background:#333;color:white}}
+
+button{{margin:5px;padding:10px}}
+
+</style>
+
+<script>
+
+function filter(status){{
+
+rows=document.querySelectorAll("tbody tr")
+
+rows.forEach(r=>{{
+if(status=="all"||r.dataset.status==status)
+r.style.display=""
+else
+r.style.display="none"
+}})
+}}
+
+</script>
 
 </head>
 
 <body>
 
-<h2 style="font-family:Arial">Tower Sites Interactive Map</h2>
+<h1>Tower Survey Summary</h1>
 
-<div id="map" style="height:700px;"></div>
+<button onclick="filter('all')">Show All</button>
+<button onclick="filter('likely')">Tower Likely</button>
+<button onclick="filter('possible')">Possible</button>
+<button onclick="filter('unlikely')">Unlikely</button>
 
-<script>
+<table>
 
-var map = L.map('map').setView([0,0],2);
+<thead>
+<tr>
+<th>Site ID</th>
+<th>Latitude</th>
+<th>Longitude</th>
+<th>Detection</th>
+<th>Dashboard</th>
+</tr>
+</thead>
 
-L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-maxZoom: 19
-}}).addTo(map);
+<tbody>
 
-{markers_js}
+{rows}
 
-</script>
+</tbody>
+
+</table>
 
 </body>
 
 </html>
 """
 
-    with open(f"{OUTPUT_FOLDER}/MASTER_MAP_INTERACTIVE.html","w") as f:
-        f.write(map_html)
+    with open(f"{OUTPUT_FOLDER}/SUMMARY_REPORT.html","w") as f:
+        f.write(html)
 
     print("\nCompleted successfully.")
-    print(f"Results saved to '{OUTPUT_FOLDER}'.")
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     run()
