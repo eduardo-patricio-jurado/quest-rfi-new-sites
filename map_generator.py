@@ -188,10 +188,14 @@ def run():
     for _,row in df.iterrows():
 
         site_id = safe_filename(row["id"])
-        lat = row["latitude"]
-        lng = row["longitude"]
-        radius = row["radius"]
-        req = row["required_height"]
+        try:
+            lat = float(row["latitude"])
+            lng = float(row["longitude"])
+            radius = float(row["radius"])
+            req = float(row["required_height"])
+        except Exception as e:
+            logging.error(f"Invalid numeric data for site {row.get('id')}: {e}")
+            continue
 
         site_name = f"{round(lat,5)}_{round(lng,5)}"
         base = f"{site_id}_{site_name}"
