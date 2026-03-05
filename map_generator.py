@@ -35,11 +35,31 @@ if not API_KEY:
     exit()
 
 # =========================
-# CLI
+# CLI OPTIONS
 # =========================
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--clear-cache", action="store_true")
+
+parser.add_argument(
+    "--clear-cache",
+    action="store_true",
+    help="Delete output folder before run"
+)
+
+parser.add_argument(
+    "--limit",
+    type=int,
+    default=None,
+    help="Limit number of rows processed"
+)
+
+parser.add_argument(
+    "--site-id",
+    type=str,
+    default=None,
+    help="Process only a specific site id"
+)
+
 args = parser.parse_args()
 
 # =========================
@@ -92,14 +112,18 @@ def circle(lat,lng,radius):
 def download(url,path):
 
     try:
+
         r = requests.get(url,timeout=20)
 
         if r.status_code == 200:
+
             with open(path,"wb") as f:
                 f.write(r.content)
 
     except Exception as e:
+
         logging.error(e)
+
 
 # =========================
 # TOWER DETECTION
@@ -131,6 +155,7 @@ def detect_tower(image_path):
 
     except:
         return "unknown"
+
 
 # =========================
 # AREA CLASSIFICATION
@@ -170,8 +195,9 @@ def classify_area(lat,lng):
     except:
         return "Unknown"
 
+
 # =========================
-# MAIN
+# MAIN PROCESS
 # =========================
 
 def run():
@@ -181,22 +207,45 @@ def run():
     df = pd.read_excel(EXCEL_FILE,dtype={"id":str})
     df.columns = df.columns.str.strip().str.lower()
 
-    summary = []
+    # =========================
+    # FILTER OPTIONS
+    # =========================
 
-    print("Processing sites...\n")
+    if args.site_id:
+
+        df = df[df["id"] == args.site_id]
+
+        print(f"\nProcessing only site {args.site_id}\n")
+
+    elif args.limit:
+
+        df = df.head(args.limit)
+
+        print(f"\nProcessing first {args.limit} locations\n")
+
+    else:
+
+        print(f"\nProcessing all {len(df)} locations\n")
+
+    summary = []
 
     for _,row in df.iterrows():
 
         try:
+
             lat = float(row["latitude"])
             lng = float(row["longitude"])
             radius = float(row["radius"])
             req = float(row["required_height"])
+
         except:
+
+            logging.warning(f"Skipping invalid row {row}")
             continue
 
         site_id = safe_filename(row["id"])
         site_name = f"{round(lat,5)}_{round(lng,5)}"
+
         base = f"{site_id}_{site_name}"
 
         print("Processing:",base)
@@ -204,7 +253,7 @@ def run():
         circle_path = circle(lat,lng,radius)
 
         # =========================
-        # STREET VIEW (TOWER)
+        # STREET VIEW
         # =========================
 
         tower_url = (
@@ -225,7 +274,7 @@ def run():
         area_type = classify_area(lat,lng)
 
         # =========================
-        # 360 STREET VIEWS
+        # 360 VIEWS
         # =========================
 
         headings = {"north":0,"east":90,"south":180,"west":270}
@@ -249,7 +298,7 @@ def run():
                 ex.submit(download,url,path)
 
         # =========================
-        # SATELLITE MAP
+        # MAP IMAGES
         # =========================
 
         sat_url = (
@@ -285,17 +334,11 @@ def run():
 
         html = f"""
 <html>
-
 <head>
 <meta charset="utf-8">
-
 <style>
 
-body {{
-font-family: Arial;
-margin:40px;
-background:#f5f5f5;
-}}
+body {{font-family:Arial;margin:40px;background:#f5f5f5}}
 
 .container {{
 background:white;
@@ -315,9 +358,7 @@ border-radius:6px;
 font-weight:bold;
 }}
 
-.button:hover {{
-background:#2f6ad9;
-}}
+.button:hover {{background:#2f6ad9}}
 
 img {{
 max-width:650px;
@@ -327,7 +368,6 @@ margin-top:10px;
 }}
 
 </style>
-
 </head>
 
 <body>
@@ -342,13 +382,9 @@ margin-top:10px;
 <p><b>Tower Detection:</b> {tower_status}</p>
 
 <p>
-
 <a class="button" href="{maps_link}" target="_blank">Google Maps</a>
-
 <a class="button" href="{street_link}" target="_blank">Street View</a>
-
 <a class="button" href="{earth_link}" target="_blank">Google Earth</a>
-
 </p>
 
 <h3>Tower Facing View</h3>
@@ -377,7 +413,6 @@ margin-top:10px;
 </div>
 
 </body>
-
 </html>
 """
 
