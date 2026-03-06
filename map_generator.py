@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 # CONFIGURATION
 # ====================================
 
-EXCEL_FILE = "locations.xlsx"
+EXCEL_FILE = "candidate_sites.xlsx"
 OUTPUT_FOLDER = "maps_output"
 
 IMG_SIZE = "640x640"
@@ -222,8 +222,8 @@ def run():
     for _,row in df.iterrows():
 
         try:
-            lat = float(row["latitude"])
-            lng = float(row["longitude"])
+            lat = float(row["latitud"])
+            lng = float(row["longitud"])
             radius = float(row["radius"])
             req = float(row["required_height"])
         except:
@@ -435,8 +435,8 @@ margin-top:10px;
 
 <tr>
 <th>Site ID</th>
-<th>Latitude</th>
-<th>Longitude</th>
+<th>Latitud</th>
+<th>Longitud</th>
 <th>Area</th>
 <th>Tower Detection</th>
 <th>Dashboard</th>
