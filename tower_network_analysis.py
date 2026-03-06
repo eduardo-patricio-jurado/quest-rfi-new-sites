@@ -14,6 +14,8 @@ CANDIDATE_FILE = "candidate_sites.xlsx"
 
 OUTPUT_FOLDER = "network_analysis_output"
 
+DEFAULT_EXISTING_RADIUS = 500
+
 # ==========================================
 # CLI OPTIONS
 # ==========================================
@@ -25,6 +27,13 @@ parser.add_argument(
     type=int,
     default=None,
     help="Limit number of candidate sites processed"
+)
+
+parser.add_argument(
+    "--closest",
+    type=int,
+    default=3,
+    help="Number of closest candidate sites per existing tower"
 )
 
 args = parser.parse_args()
@@ -59,14 +68,19 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * c
 
 
-def validate_site(row, row_number, dataset_name):
+def validate_site(row, row_number, dataset_name, id_type="string"):
 
     try:
 
-        site_id = str(row["id"]).strip()
+        raw_id = row["id"]
 
-        if site_id == "" or site_id.lower() == "nan":
-            raise ValueError("Missing site ID")
+        if pd.isna(raw_id):
+            raise ValueError("Missing ID")
+
+        if id_type == "integer":
+            site_id = int(raw_id)
+        else:
+            site_id = str(raw_id).strip()
 
         lat = float(row["latitude"])
         lng = float(row["longitude"])
@@ -77,7 +91,16 @@ def validate_site(row, row_number, dataset_name):
         if not (-180 <= lng <= 180):
             raise ValueError("Longitude out of range")
 
-        return site_id, lat, lng
+        radius = row.get("radius", None)
+
+        if pd.isna(radius):
+            radius = None
+        else:
+            radius = float(radius)
+
+        location_desc = row.get("location", "")
+
+        return site_id, lat, lng, radius, location_desc
 
     except Exception as e:
 
@@ -85,7 +108,7 @@ def validate_site(row, row_number, dataset_name):
             f"{dataset_name} row {row_number} skipped: {e}"
         )
 
-        return None, None, None
+        return None, None, None, None, None
 
 
 # ==========================================
@@ -113,15 +136,22 @@ existing_clean = []
 
 for i, row in existing_raw.iterrows():
 
-    site_id, lat, lng = validate_site(row, i, "existing_towers")
+    site_id, lat, lng, radius, desc = validate_site(
+        row, i, "existing_towers"
+    )
 
     if site_id is None:
         continue
 
+    if radius is None:
+        radius = DEFAULT_EXISTING_RADIUS
+
     existing_clean.append({
         "id": site_id,
         "latitude": lat,
-        "longitude": lng
+        "longitude": lng,
+        "radius": radius,
+        "location_description": desc
     })
 
 existing = pd.DataFrame(existing_clean)
@@ -134,18 +164,23 @@ candidate_clean = []
 
 for i, row in candidate_raw.iterrows():
 
-    site_id, lat, lng = validate_site(row, i, "candidate_sites")
+    site_id, lat, lng, radius, _ = validate_site(
+        row, i, "candidate_sites", id_type="integer"
+    )
 
     if site_id is None:
         continue
 
     candidate_clean.append({
-        "id": site_id,
+        "id": int(site_id),
         "latitude": lat,
-        "longitude": lng
+        "longitude": lng,
+        "radius": radius
     })
 
 candidate = pd.DataFrame(candidate_clean)
+
+candidate["id"] = candidate["id"].astype(int)
 
 if args.limit:
     candidate = candidate.head(args.limit)
@@ -154,142 +189,121 @@ print(f"Loaded {len(existing)} existing towers")
 print(f"Loaded {len(candidate)} candidate sites")
 
 # ==========================================
-# DISTANCE ANALYSIS
+# EXISTING → CLOSEST CANDIDATES
 # ==========================================
 
-nearest_results = []
-distance_rows = []
+closest_rows = []
 
-for _, c in candidate.iterrows():
+for _, e in existing.iterrows():
 
-    cid = c["id"]
-    clat = c["latitude"]
-    clng = c["longitude"]
+    eid = e["id"]
+    elat = e["latitude"]
+    elng = e["longitude"]
 
-    nearest_tower = None
-    nearest_distance = None
+    distances = []
 
-    distance_row = {"candidate_id": cid}
+    for _, c in candidate.iterrows():
 
-    for _, e in existing.iterrows():
+        cid = c["id"]
+        clat = c["latitude"]
+        clng = c["longitude"]
 
-        eid = e["id"]
-        elat = e["latitude"]
-        elng = e["longitude"]
+        dist = haversine(elat, elng, clat, clng)
 
-        dist = haversine(clat, clng, elat, elng)
+        distances.append({
+            "existing_id": eid,
+            "location_description": e["location_description"],
+            "candidate_id": cid,
+            "distance_m": round(dist,1),
+            "candidate_lat": clat,
+            "candidate_lng": clng
+        })
 
-        distance_row[eid] = round(dist, 1)
+    distances = sorted(distances, key=lambda x: x["distance_m"])
 
-        if nearest_distance is None or dist < nearest_distance:
+    closest_rows.extend(distances[:args.closest])
 
-            nearest_distance = dist
-            nearest_tower = eid
+closest_df = pd.DataFrame(closest_rows)
 
-    nearest_results.append({
-        "candidate_id": cid,
-        "candidate_lat": clat,
-        "candidate_lng": clng,
-        "nearest_tower": nearest_tower,
-        "distance_m": round(nearest_distance, 1)
-    })
-
-    distance_rows.append(distance_row)
-
-nearest_df = pd.DataFrame(nearest_results)
-distance_df = pd.DataFrame(distance_rows)
-
-# ==========================================
-# SAVE REPORTS
-# ==========================================
-
-nearest_df.to_csv(
-    f"{OUTPUT_FOLDER}/nearest_tower_analysis.csv",
+closest_df.to_csv(
+    f"{OUTPUT_FOLDER}/closest_candidates_per_tower.csv",
     index=False
 )
 
-distance_df.to_csv(
-    f"{OUTPUT_FOLDER}/distance_matrix.csv",
-    index=False
-)
-
-print("Distance analysis complete")
+print("Closest candidate analysis saved")
 
 # ==========================================
-# INTERACTIVE MAP
+# GENERATE MAP PER EXISTING TOWER
 # ==========================================
 
-center_lat = candidate["latitude"].mean()
-center_lng = candidate["longitude"].mean()
+for _, tower in existing.iterrows():
 
-m = folium.Map(location=[center_lat, center_lng], zoom_start=10)
+    tower_id = tower["id"]
+    desc = tower["location_description"]
+    tlat = tower["latitude"]
+    tlng = tower["longitude"]
 
-# Existing towers (blue)
+    tower_candidates = closest_df[
+        closest_df["existing_id"] == tower_id
+    ]
 
-for _, row in existing.iterrows():
+    tower_map = folium.Map(location=[tlat, tlng], zoom_start=13)
 
-    folium.CircleMarker(
-        location=[row["latitude"], row["longitude"]],
-        radius=6,
-        color="blue",
-        fill=True,
-        fill_opacity=0.9,
-        popup=f"Existing Tower<br>ID: {row['id']}"
-    ).add_to(m)
+    folium.Marker(
+        location=[tlat, tlng],
+        popup=f"<b>{tower_id}</b><br>{desc}",
+        icon=folium.Icon(color="blue")
+    ).add_to(tower_map)
 
-# Candidate towers (green)
+    for _, row in tower_candidates.iterrows():
 
-for _, row in candidate.iterrows():
+        clat = row["candidate_lat"]
+        clng = row["candidate_lng"]
+        cid = row["candidate_id"]
+        dist = row["distance_m"]
 
-    folium.CircleMarker(
-        location=[row["latitude"], row["longitude"]],
-        radius=6,
-        color="green",
-        fill=True,
-        fill_opacity=0.9,
-        popup=f"Candidate Site<br>ID: {row['id']}"
-    ).add_to(m)
+        folium.CircleMarker(
+            location=[clat, clng],
+            radius=6,
+            color="green",
+            fill=True,
+            popup=f"Candidate {cid}<br>{dist} meters"
+        ).add_to(tower_map)
 
-# Lines to nearest tower
+        folium.PolyLine(
+            [
+                [tlat, tlng],
+                [clat, clng]
+            ],
+            color="red",
+            weight=3,
+            popup=f"{dist} meters"
+        ).add_to(tower_map)
 
-for _, row in nearest_df.iterrows():
+    filename = f"{OUTPUT_FOLDER}/existing_{tower_id}_nearest_candidates.html"
 
-    cid = row["candidate_id"]
-    nid = row["nearest_tower"]
+    tower_map.save(filename)
 
-    c = candidate[candidate["id"] == cid].iloc[0]
-    n = existing[existing["id"] == nid].iloc[0]
-
-    folium.PolyLine(
-        [
-            [c["latitude"], c["longitude"]],
-            [n["latitude"], n["longitude"]]
-        ],
-        color="gray",
-        weight=2
-    ).add_to(m)
-
-m.save(f"{OUTPUT_FOLDER}/tower_comparison_map.html")
-
-print("Interactive map generated")
+print("Individual tower maps generated")
 
 # ==========================================
 # HTML SUMMARY REPORT
 # ==========================================
 
-rows = ""
+rows=""
 
-for _, r in nearest_df.iterrows():
+for _,row in closest_df.iterrows():
 
     rows += f"""
 <tr>
-<td>{r['candidate_id']}</td>
-<td>{r['nearest_tower']}</td>
-<td>{r['distance_m']}</td>
+<td>{row['existing_id']}</td>
+<td>{row['location_description']}</td>
+<td>{row['candidate_id']}</td>
+<td>{row['distance_m']}</td>
 </tr>
 """
 
-html = f"""
+html=f"""
 <html>
 
 <head>
@@ -297,12 +311,12 @@ html = f"""
 <style>
 
 body {{
-font-family: Arial;
+font-family:Arial;
 margin:40px;
 }}
 
 table {{
-border-collapse: collapse;
+border-collapse:collapse;
 }}
 
 th,td {{
@@ -316,18 +330,15 @@ border:1px solid #ccc;
 
 <body>
 
-<h1>Network Analysis Summary</h1>
-
-<p>
-<a href="tower_comparison_map.html">Open Interactive Map</a>
-</p>
+<h1>Closest Candidate Sites Per Tower</h1>
 
 <table>
 
 <tr>
+<th>Existing Tower</th>
+<th>Location</th>
 <th>Candidate Site</th>
-<th>Nearest Existing Tower</th>
-<th>Distance (meters)</th>
+<th>Distance (m)</th>
 </tr>
 
 {rows}
@@ -348,4 +359,4 @@ with open(
 
 print("Summary report generated")
 
-print("\nAnalysis Complete")
+print("\nNetwork Analysis Complete")
